@@ -38,8 +38,20 @@ O engine é localizado pela variável `MADSCREEN_ENGINE`, ao lado do `.exe` do a
 (desenvolvimento). O runtime FFmpeg é procurado em `MADSCREEN_ENCODER_RUNTIME`, em `encoder-runtime/` ao lado do
 engine ou na própria pasta do engine.
 
-Para gerar o instalador: `npm run tauri --prefix apps/madscreen-app -- build` (a assinatura de atualização usa as
-variáveis `TAURI_SIGNING_PRIVATE_KEY` e `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; veja [Atualizações](updater.md)).
+Para gerar o instalador (os mesmos passos do workflow `.github/workflows/app.yml`):
+
+```powershell
+cargo build --release -p madscreen-encode-test --features publish
+./tools/encode/prepare-runtime.ps1 -BundleDestination apps/madscreen-app/src-tauri/encoder-runtime
+New-Item -ItemType Directory -Force apps/madscreen-app/src-tauri/binaries | Out-Null
+Copy-Item target/release/madscreen-encode-test.exe apps/madscreen-app/src-tauri/binaries/madscreen-encode-test-x86_64-pc-windows-msvc.exe
+npm ci --prefix viewer; npm ci --prefix apps/madscreen-app
+npm run tauri --prefix apps/madscreen-app -- build
+```
+
+O sidecar entra como `externalBin` (com o *triple* do alvo no nome) e a pasta `encoder-runtime/` como recurso do Tauri
+(`tauri.windows.conf.json`). A assinatura de atualização usa as variáveis `TAURI_SIGNING_PRIVATE_KEY` e
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (veja [Atualizações](updater.md)).
 
 ## Verificações
 

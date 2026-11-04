@@ -42,8 +42,10 @@ grava os segredos no Worker mantendo `SFU_PROVIDER=cloudflare`.
 **Sessões.** Cada publicação tem uma sala aleatória própria, confirmada no Room Service antes de anunciar "ao vivo".
 Os JWTs de entrada duram 60 s; o publicador só publica tela e áudio; espectadores só assinam; canais de dados ficam
 desligados; tokens não são persistidos. Fechar o publicador apaga a sala; fechar um espectador remove só ele.
-Limitação conhecida: o LiveKit auto-hospedado não revoga imediatamente tokens já emitidos; o cliente encerra ao
-perder o acesso por *heartbeat*/eventos.
+**Revogação:** o LiveKit auto-hospedado não invalida um JWT já emitido (ele vale até expirar). Por isso, quando alguém
+perde o acesso (sair, kick, exclusão), o Worker **encerra a geração e a sala afetadas**: o token antigo não leva mídia
+nova, e uma nova publicação cria sala e tokens novos. O cliente também encerra ao perder o acesso por
+*heartbeat*/eventos.
 
 **Áudio estéreo.** O SDK Rust 0.10.0 omite o sinalizador `TF_STEREO` ([bug upstream](https://github.com/livekit/rust-sdks/issues/1018)).
 A cópia em `third_party/livekit` corrige o anúncio estéreo/DTX; veja `third_party/livekit/MADSCREEN_PATCH.md`.

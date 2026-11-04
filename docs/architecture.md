@@ -25,7 +25,7 @@ App Tauri 2 / WebView2
 | Engine (sidecar) | `apps/madscreen-encode-test` | Captura → conversão → encoder → transporte; fala com o app por IPC JSON |
 | Captura | `crates/madscreen-capture` | WGC e Desktop Duplication, mailbox *latest-frame-wins* |
 | Encoders | `crates/madscreen-encode` | NVENC (D3D11 zero-copy), AMF, QuickSync e x264 via FFmpeg |
-| Áudio | `crates/madscreen-audio` | WASAPI *process loopback*, mixagem, Opus |
+| Áudio | `crates/madscreen-audio` | WASAPI *process loopback* e mixagem em PCM (o Opus é codificado pelo WebRTC) |
 | Transporte | `crates/madscreen-transport`, `crates/madscreen-transport-cf` | Publicação no LiveKit e na Cloudflare |
 | IPC | `crates/madscreen-ipc` | Protocolo JSON, uma linha por mensagem |
 | Viewer/UI | `viewer/shared`, `viewer/web` | Cliente do Worker, login, diretório e player, usados pelo app e pela web |
@@ -75,8 +75,10 @@ O LiveKit é uma reserva; a política automática de saúde e uso é opt-in. Vej
 
 ## Segurança e privacidade
 
-- Credenciais do SFU e o segredo de sessão ficam só no Worker; app e viewer só falam com `/api/*`.
-- Tokens, segredos e SDP não são gravados em log nem em estado persistente.
+- Credenciais do SFU e o segredo de sessão ficam só no Worker. App e viewer falam com o Worker (`/api/*` e, no login,
+  `/auth/*`) e, depois de autorizados, enviam e recebem a mídia **direto do SFU**, com tokens de curta duração.
+- O Worker não grava segredos, tokens do SFU nem SDP em log ou em estado persistente. O cliente guarda localmente só o
+  token de sessão do usuário (no navegador/WebView2).
 - O diagnóstico é local, copiado por ação do usuário e sem nomes, tokens, SDP ou endereços.
 - O app não pede microfone. A atualização valida assinatura e versão antes de instalar ([Atualizações](updater.md)).
 - Para reportar uma vulnerabilidade, veja [SECURITY.md](../SECURITY.md).

@@ -27,8 +27,9 @@ e problemas no instalador.
 ## Fora de escopo
 
 - Ausência de assinatura Authenticode do instalador (conhecida: a atualização usa assinatura Minisign própria).
-- Tokens do LiveKit auto-hospedado já emitidos não serem revogados imediatamente (limitação documentada em
-  [docs/sfu.md](docs/sfu.md)).
+- O fato de um JWT do LiveKit auto-hospedado já emitido continuar válido até expirar: o Worker mitiga encerrando a
+  geração e a sala afetadas (veja [docs/sfu.md](docs/sfu.md)). Um acesso indevido à **mídia** depois da revogação é
+  de interesse e deve ser reportado.
 - Ataques que exijam acesso físico ou controle prévio da máquina da vítima.
 
 ## Dados e segredos

@@ -24,7 +24,7 @@ A/V. Só entra como "medido" o que tem número reproduzível no hardware citado.
 | Adaptação de taxa (NVENC, relay UDP local) | Na queda para 3 Mbps, o FPS recebido subiu de 5,5 para 56,5 com a política atual | Cenário sintético em laboratório, não é jogo nem WAN |
 | H.264 High × Constrained Baseline (NVENC, SSIM/PSNR) | CB perde cerca de 1 a 1,6 dB de PSNR e gasta 4–20% mais bytes; a diferença é ≈ 0 a partir de 8 Mbps em desktop | Exploratório, só NVENC |
 | Atualização assinada | Verificação de assinatura, de versão e do manifesto cobertas por testes | Upgrade entre versões e PC limpo ainda sem resultado |
-| Revogação de acesso (kick, saída, exclusão) | Seis ações exercitadas contra o Worker e o LiveKit reais; sem quadros indevidos depois da revogação | Tokens já emitidos do LiveKit auto-hospedado não são revogados na hora |
+| Revogação de acesso (kick, saída, exclusão) | Seis ações exercitadas contra o Worker e o LiveKit reais; sem quadros indevidos depois da revogação | O JWT já emitido do LiveKit auto-hospedado vale até expirar; a mitigação é encerrar a geração e a sala |
 
 ## Rumo à v1.0
 

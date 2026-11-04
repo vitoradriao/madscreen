@@ -16,7 +16,8 @@ verificar.
   `libvpl`), a licença, o `SOURCE-OFFER.md` e o `tools/encode/NOTICE.md`.
 - O x264 é **GPL**. Por isso o madscreen é distribuído sob a
   **GPL-3.0-or-later** ([LICENSE](../LICENSE)): quem recebe o instalador recebe também o direito ao código-fonte.
-- `nonfree` **nunca** é aceito. O auditor do CI bloqueia `--enable-nonfree` (veja abaixo).
+- `nonfree` **nunca** é aceito. O auditor (`tools/release/runtime-audit.mjs`) detecta `--enable-nonfree`; no CI do
+  instalador o `--strict` (que faz a detecção falhar o build) é ativado nas versões 1.x ou maiores (veja abaixo).
 
 ## Obrigações ao distribuir
 

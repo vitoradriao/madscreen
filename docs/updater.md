@@ -28,7 +28,7 @@ que já embarcaram. Só a chave pública é versionada (`tauri.conf.json`).
    `TAURI_SIGNING_PRIVATE_KEY` e `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` estão configurados como segredos.
 2. `tools/release/manifest.mjs` cria `latest.json` e `SHA256SUMS.txt`, escolhendo exatamente o instalador da versão
    configurada e recusando assinatura sem versão, com versão diferente ou com destino arbitrário.
-3. O verificador `examples/verify-update.rs` valida a criptografia com a mesma biblioteca Minisign do plugin e compara
+3. O verificador `apps/madscreen-app/src-tauri/examples/verify-update.rs` valida a criptografia com a mesma biblioteca Minisign do plugin e compara
    a versão assinada à anunciada.
 4. O fluxo `workflow_dispatch` com `publish_release=true` cria um *draft* no repositório de releases, envia os arquivos
    verificados e só então publica como *latest*. Ele não sobrescreve uma tag existente. Precisa de um segredo

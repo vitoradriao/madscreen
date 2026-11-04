@@ -2,7 +2,7 @@
 
 # madscreen
 
-**Compartilhe a tela e o som de um aplicativo com amigos, sem pesar no jogo.**
+**Compartilhe a tela e o som de um aplicativo com amigos, com foco em preservar o FPS do jogo.**
 
 [![Licença: GPL-3.0-or-later](https://img.shields.io/badge/licen%C3%A7a-GPL--3.0--or--later-blue.svg)](LICENSE)
 ![Plataforma: Windows 10 1903+ x64](https://img.shields.io/badge/plataforma-Windows%2010%201903%2B%20x64-0078d4)

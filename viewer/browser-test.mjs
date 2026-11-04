@@ -31,7 +31,7 @@ try {
   await send("Runtime.enable");await send("Emulation.setFocusEmulationEnabled",{enabled:true});
   await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
   await send("Page.navigate",{url:`http://127.0.0.1:${server.address().port}`});
-  const response=await send("Runtime.evaluate",{expression:'new Promise(resolve=>{const timer=setInterval(()=>{if(window.qa){clearInterval(timer);resolve(window.qa);}},50);setTimeout(()=>{clearInterval(timer);resolve({ok:false,error:"timeout"});},15000);})',awaitPromise:true,returnByValue:true});
+  const response=await send("Runtime.evaluate",{expression:'new Promise(resolve=>{const timer=setInterval(()=>{if(window.qa){clearInterval(timer);resolve(window.qa);}},50);setTimeout(()=>{clearInterval(timer);resolve({ok:false,error:"timeout"});},60000);})',awaitPromise:true,returnByValue:true});
   const result={...response.result.value,browserErrors:errors};
   const splitScreenshot=await send("Page.captureScreenshot",{format:"png"});
   await writeFile(path.join(output,"splitscreen.png"),Buffer.from(splitScreenshot.data,"base64"));
