@@ -17,8 +17,8 @@ const child=spawn(process.env.CHROME_PATH??"C:/Program Files/Google/Chrome/Appli
 let socket;
 try {
   let port;
-  for(let i=0;i<100;i++){try{port=(await readFile(path.join(profile,"DevToolsActivePort"),"utf8")).split("\n")[0];break;}catch{await new Promise(resolve=>setTimeout(resolve,100));}}
-  if(!port)throw Error("Chrome de teste não iniciou; configure CHROME_PATH.");
+  for(let i=0;i<300&&child.exitCode===null;i++){try{port=(await readFile(path.join(profile,"DevToolsActivePort"),"utf8")).split("\n")[0];break;}catch{await new Promise(resolve=>setTimeout(resolve,100));}}
+  if(!port)throw Error(`Chrome de teste não iniciou (código de saída: ${child.exitCode ?? "ainda em execução"}); configure CHROME_PATH.`);
   const tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   socket=new WebSocket(tabs.find(tab=>tab.type==="page"&&tab.url==="about:blank").webSocketDebuggerUrl);
   await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject;});

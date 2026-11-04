@@ -1,0 +1,81 @@
+{
+  "baseline_condition": "baseline",
+  "games": [
+    {
+      "id": "esport-dx11",
+      "exe": "game_dx11.exe",
+      "manual": true
+    },
+    {
+      "id": "pesado-dx12",
+      "exe": "game_dx12.exe",
+      "manual": true
+    },
+    {
+      "id": "replay-vulkan",
+      "exe": "game_vulkan.exe",
+      "manual": true
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "S-A",
+      "fps_cap": 144,
+      "manual": true,
+      "description": "Limite o jogo a 144 FPS; mesmo replay, resolução e qualidade."
+    },
+    {
+      "id": "S-B",
+      "fps_cap": null,
+      "manual": true,
+      "description": "Remova o limite de FPS; verifique GPU próxima de 99%."
+    }
+  ],
+  "conditions": [
+    {
+      "id": "baseline",
+      "manual": true,
+      "start": null,
+      "stop": null
+    },
+    {
+      "id": "madscreen-1080p60",
+      "manual": false,
+      "start": "$monitor = '0'; if ($env:MADSCREEN_MONITOR) { $monitor = $env:MADSCREEN_MONITOR }; $p = Start-Process -FilePath '.\\target\\release\\madscreen-encode-test.exe' -ArgumentList \"--source monitor:$monitor --size 1920x1080 --fps 60 --codec h264 --bitrate 12 --preset p1 --inflight 3 --sync flush --gpu-priority above-normal --duration 0 --warmup 0 --output NUL --stats-interval 5\" -PassThru; Start-Sleep -Seconds 3; $p.Refresh(); if ($p.HasExited) { throw 'Encoder encerrou durante a inicialização; confira o console e --probe.' }",
+      "stop": "Stop-Process -Name madscreen-encode-test -ErrorAction SilentlyContinue; for ($attempt = 0; $attempt -lt 100; $attempt++) { if (-not (Get-Process -Name madscreen-encode-test -ErrorAction SilentlyContinue)) { break }; Start-Sleep -Milliseconds 50 }; if (Get-Process -Name madscreen-encode-test -ErrorAction SilentlyContinue) { throw 'Não foi possível encerrar o encoder em 5 segundos.' }",
+      "check": "if (-not (Get-Process -Name madscreen-encode-test -ErrorAction SilentlyContinue)) { throw 'Encoder não está ativo; corrida inválida.' }"
+    },
+    {
+      "id": "madscreen-1080p144",
+      "manual": false,
+      "start": "$monitor = '0'; if ($env:MADSCREEN_MONITOR) { $monitor = $env:MADSCREEN_MONITOR }; $p = Start-Process -FilePath '.\\target\\release\\madscreen-encode-test.exe' -ArgumentList \"--source monitor:$monitor --size 1920x1080 --fps 144 --codec h264 --bitrate 18 --preset p1 --inflight 3 --sync flush --gpu-priority above-normal --duration 0 --warmup 0 --output NUL --stats-interval 5\" -PassThru; Start-Sleep -Seconds 3; $p.Refresh(); if ($p.HasExited) { throw 'Encoder encerrou durante a inicialização; confira o console e --probe.' }",
+      "stop": "Stop-Process -Name madscreen-encode-test -ErrorAction SilentlyContinue; for ($attempt = 0; $attempt -lt 100; $attempt++) { if (-not (Get-Process -Name madscreen-encode-test -ErrorAction SilentlyContinue)) { break }; Start-Sleep -Milliseconds 50 }; if (Get-Process -Name madscreen-encode-test -ErrorAction SilentlyContinue) { throw 'Não foi possível encerrar o encoder em 5 segundos.' }",
+      "check": "if (-not (Get-Process -Name madscreen-encode-test -ErrorAction SilentlyContinue)) { throw 'Encoder não está ativo; corrida inválida.' }"
+    },
+    {
+      "id": "madscreen-1440p144",
+      "manual": false,
+      "start": "$monitor = '0'; if ($env:MADSCREEN_MONITOR) { $monitor = $env:MADSCREEN_MONITOR }; $p = Start-Process -FilePath '.\\target\\release\\madscreen-encode-test.exe' -ArgumentList \"--source monitor:$monitor --size 2560x1440 --fps 144 --codec av1 --fallback-hevc --bitrate 25 --preset p1 --inflight 3 --sync flush --gpu-priority above-normal --duration 0 --warmup 0 --output NUL --stats-interval 5\" -PassThru; Start-Sleep -Seconds 3; $p.Refresh(); if ($p.HasExited) { throw 'Encoder encerrou durante a inicialização; confira o console e --probe.' }",
+      "stop": "Stop-Process -Name madscreen-encode-test -ErrorAction SilentlyContinue; for ($attempt = 0; $attempt -lt 100; $attempt++) { if (-not (Get-Process -Name madscreen-encode-test -ErrorAction SilentlyContinue)) { break }; Start-Sleep -Milliseconds 50 }; if (Get-Process -Name madscreen-encode-test -ErrorAction SilentlyContinue) { throw 'Não foi possível encerrar o encoder em 5 segundos.' }",
+      "check": "if (-not (Get-Process -Name madscreen-encode-test -ErrorAction SilentlyContinue)) { throw 'Encoder não está ativo; corrida inválida.' }"
+    },
+    {
+      "id": "teamspeak6",
+      "manual": true,
+      "start": null,
+      "stop": null
+    },
+    {
+      "id": "discord-golive",
+      "manual": true,
+      "start": null,
+      "stop": null
+    },
+    {
+      "id": "obs-nvenc",
+      "manual": true,
+      "start": null,
+      "stop": null
+    }
+  ]
+}
