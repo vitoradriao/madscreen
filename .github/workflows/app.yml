@@ -70,18 +70,18 @@ jobs:
           cache-dependency-path: apps/madscreen-app/package-lock.json
       - name: Engine (sidecar com captura e publicacao)
         run: cargo build --release -p madscreen-encode-test --features publish
-      - name: Runtime AMF, QuickSync e CPU (versao e SHA-256 fixos)
+      - name: Runtime AMF, QuickSync e x264 (pacote e SHA-256 fixos)
         run: ./tools/encode/prepare-runtime.ps1 -BundleDestination apps/madscreen-app/src-tauri/encoder-runtime
       - name: Inventario do runtime e bloqueio de configuracao nonfree (app GPL-3.0-or-later)
         run: |
           $releaseVersion = (Get-Content apps/madscreen-app/src-tauri/tauri.conf.json | ConvertFrom-Json).version
-          $auditArguments = @('tools/release/runtime-audit.mjs', 'target/encoder-runtime/ffmpeg-8.1.2-full_build-shared/bin/ffmpeg.exe', 'target/runtime-distribution.json', '--policy', 'gpl-open-source', '--require-encoders', 'h264_amf,h264_qsv,libx264')
+          $auditArguments = @('tools/release/runtime-audit.mjs', 'target/encoder-runtime/madscreen-runtime-gpl/bin/ffmpeg.exe', 'target/runtime-distribution.json', '--policy', 'gpl-open-source', '--require-encoders', 'h264_amf,h264_qsv,libx264')
           if ($releaseVersion -match '^[1-9][0-9]*\.') { $auditArguments += '--strict' }
           & node @auditArguments
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Conferir DLLs e avisos efetivamente empacotados
         run: |
-          node tools/release/runtime-inventory.mjs target/encoder-runtime/ffmpeg-8.1.2-full_build-shared apps/madscreen-app/src-tauri/encoder-runtime target/runtime-inventory.json
+          node tools/release/runtime-inventory.mjs target/encoder-runtime/madscreen-runtime-gpl apps/madscreen-app/src-tauri/encoder-runtime target/runtime-inventory.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Guardar inventario para revisao
         if: ${{ always() }}

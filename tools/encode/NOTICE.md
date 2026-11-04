@@ -1,15 +1,17 @@
-# Runtime de codificação distribuído
+# Avisos do runtime distribuído
 
-O instalador inclui FFmpeg 8.1.2 full shared de Gyan Doshi, com libx264,
-sob GPL v3 ou posterior. LICENSE e README.txt do pacote acompanham as DLLs.
-Configuração e fontes correspondentes: https://www.gyan.dev/ffmpeg/builds/
-e https://github.com/FFmpeg/FFmpeg/tree/n8.1.2 . Bibliotecas externas e suas
-fontes são relacionadas no README do fornecedor e na configuração de build.
+O instalador inclui bibliotecas do **FFmpeg** (libavcodec, libavutil, libswresample), o **x264** (`libx264`) e o
+dispatcher **oneVPL** (`libvpl`), compilados pelo projeto a partir das fontes fixadas em
+`tools/encode/native-runtime-sources.json` e `tools/encode/native-runtime-gpl-sources.json`.
 
-O carregamento é dinâmico; os drivers NVIDIA/AMD/Intel continuam sendo fornecidos
-pelos fabricantes. AMF e QuickSync não são implementações de software do app.
+- FFmpeg e x264 são software livre sob a GPL; o madscreen é distribuído sob a **GPL-3.0-or-later** (arquivo `LICENSE`
+  do repositório). Os textos de licença acompanham o pacote (`LICENSE`, `x264-GPL-2.0.txt`).
+- O **código-fonte correspondente** (FFmpeg, x264, configuração e scripts de build) está listado, com SHA-256, em
+  `SOURCE-OFFER.md` e é publicado junto de cada release do runtime. É oferecido sem custo a quem recebe o instalador.
+- AMD AMF e Intel oneVPL são MIT. NVIDIA NVENC usa o driver do fabricante e não depende destas bibliotecas.
+- A licença de copyright **não cobre patentes**: o H.264/AVC pode exigir licenças de patentes em alguns países.
+  Veja `docs/runtime-distribution.md`.
 
-Para reproduzir o pacote, execute tools/encode/prepare-runtime.ps1; a versão e o
-SHA-256 são fixos no script. Distribuições do app com esse runtime devem cumprir
-as condições da GPL aplicáveis ao conjunto, incluindo disponibilização das fontes
-correspondentes e instruções de compilação. Não substituir por build nonfree.
+Para reproduzir o pacote: `tools/encode/build-native-runtime.ps1` (base), `tools/encode/build-native-runtime-gpl.ps1`
+(FFmpeg + x264) e `tools/encode/package-runtime-gpl.ps1`. O `prepare-runtime.ps1` baixa o pacote publicado e confere o
+SHA-256 fixado em `tools/encode/runtime-gpl.json`.

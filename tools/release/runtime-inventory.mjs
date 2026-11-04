@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
-const REQUIRED = ['avcodec-62.dll', 'avutil-60.dll', 'swresample-6.dll', 'LICENSE', 'README.txt', 'NOTICE.md'];
+const REQUIRED = ['avcodec-62.dll', 'avutil-60.dll', 'swresample-6.dll', 'libx264-165.dll', 'libvpl.dll', 'LICENSE', 'README.txt', 'NOTICE.md'];
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
 /** Inventory the files actually packaged, separately from ffmpeg.exe's build flags. */

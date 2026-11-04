@@ -9,10 +9,12 @@ verificar.
 
 ## O que acompanha o instalador
 
-- FFmpeg **8.1.2 *full shared*** (ABI `libavcodec 62` / `libavutil 60`), baixado por
-  `tools/encode/prepare-runtime.ps1` com versão e **SHA-256 fixos**. O script copia só as três DLLs, a licença, o
-  `README.txt` com a configuração da build e o `tools/encode/NOTICE.md`.
-- Essa build inclui componentes **GPL** (por exemplo `libx264`). Por isso o madscreen é distribuído sob a
+- Um **runtime mínimo** compilado pelo projeto: FFmpeg `760d10603e` (ABI `libavcodec 62` / `libavutil 60`) + **x264**
+  (build 165) + AMD AMF + Intel oneVPL, sem as dezenas de bibliotecas de uma build *full*. O pacote é publicado como
+  release (`runtime-AAAA-MM-DD`) e `tools/encode/prepare-runtime.ps1` o baixa com **SHA-256 fixo** em
+  `tools/encode/runtime-gpl.json`. O instalador leva cinco DLLs (`avcodec`, `avutil`, `swresample`, `libx264`,
+  `libvpl`), a licença, o `SOURCE-OFFER.md` e o `tools/encode/NOTICE.md`.
+- O x264 é **GPL**. Por isso o madscreen é distribuído sob a
   **GPL-3.0-or-later** ([LICENSE](../LICENSE)): quem recebe o instalador recebe também o direito ao código-fonte.
 - `nonfree` **nunca** é aceito. O auditor do CI bloqueia `--enable-nonfree` (veja abaixo).
 
@@ -20,20 +22,21 @@ verificar.
 
 1. **Licença e avisos** do app e de cada componente junto do instalador (`LICENSE`, `THIRD-PARTY-NOTICES.md`,
    `NOTICE.md` e os avisos do FFmpeg).
-2. **Código-fonte correspondente** do runtime em cada release: a versão exata do FFmpeg, os patches, a configuração
-   da build (a linha `configuration:` de `ffmpeg -version` e o `README.txt` do pacote) e as instruções para
-   reconstruí-lo. Hospede os arquivos fonte junto da release ou aponte para um endereço estável e verificável por hash.
+2. **Código-fonte correspondente** do runtime: a release do runtime publica os tarballs do FFmpeg e do x264 com SHA-256,
+   a configuração da build (`notices/config.mak`) e o `SOURCE-OFFER.md`; os scripts que o reconstroem estão em
+   `tools/encode/` (`build-native-runtime.ps1`, `build-native-runtime-gpl.ps1`, `package-runtime-gpl.ps1`). Não há
+   patches no FFmpeg nem no x264.
 3. **Sem restrições adicionais** ao que a GPL concede (por exemplo, proibir engenharia reversa do app).
 
 ## Verificar o runtime
 
 ```powershell
 # Auditoria da configuração do FFmpeg (política GPL aberta; --strict falha em configuração bloqueada)
-node tools/release/runtime-audit.mjs target/encoder-runtime/ffmpeg-8.1.2-full_build-shared/bin/ffmpeg.exe `
+node tools/release/runtime-audit.mjs target/encoder-runtime/madscreen-runtime-gpl/bin/ffmpeg.exe `
   bench-results/runtime.json --policy gpl-open-source --strict --require-encoders h264_amf,h264_qsv,libx264
 
 # Inventário das DLLs e dos avisos que realmente vão no pacote
-node tools/release/runtime-inventory.mjs target/encoder-runtime/ffmpeg-8.1.2-full_build-shared `
+node tools/release/runtime-inventory.mjs target/encoder-runtime/madscreen-runtime-gpl `
   apps/madscreen-app/src-tauri/encoder-runtime bench-results/runtime-inventory.json
 ```
 
@@ -53,8 +56,10 @@ isso vale também para software livre e sem fins lucrativos. Na prática:
 - Uma DLL **OpenH264** compilada por nós **não** tem a cobertura da Cisco, que vale apenas para o **binário que a
   própria Cisco compila e hospeda** e é baixado dela em tempo de execução.
 
-Decida conscientemente se e como distribui um encoder por CPU. Alternativas: manter só os encoders de hardware, ou
-tratar o x264 como componente opcional instalado pelo usuário.
+**Decisão do projeto (4/nov/2026):** o x264 **fica no instalador** como fallback por CPU, sob a GPL-3.0-or-later do app,
+com o código-fonte correspondente publicado em cada release. O risco de patentes AVC é aceito conscientemente pelo
+mantenedor. O objetivo é distribuir um runtime **mínimo e reproduzível** (só FFmpeg + x264 + AMF/oneVPL), em vez do pacote
+*full* de terceiros usado até aqui, cujas DLLs embutem dezenas de bibliotecas que o madscreen não usa.
 
 ## Candidato OpenH264 (experimental)
 

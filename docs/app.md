@@ -156,11 +156,11 @@ Linux, `cargo check` exige `libwebkit2gtk-4.1-dev` e `libsoup-3.0-dev`.
 Mudanças em `viewer/shared` também disparam esse build. O instalador inclui engine e instalação do
 WebView2 se faltar, sem exigir configuração de captura/publicação separada para os amigos.
 
-O CI executa `tools/encode/prepare-runtime.ps1`, confere SHA-256 do FFmpeg 8.1.2 shared
-(ABI avcodec 62 / avutil 60) e embute `src-tauri/encoder-runtime/` ao lado do engine pelo
+O CI executa `tools/encode/prepare-runtime.ps1`, confere SHA-256 do runtime mínimo FFmpeg + x264
+(ABI avcodec 62 / avutil 60; ver `tools/encode/runtime-gpl.json`) e embute `src-tauri/encoder-runtime/` ao lado do engine pelo
 mapeamento de recursos do Tauri. Para build local do instalador, execute também o script com
 `-BundleDestination apps/madscreen-app/src-tauri/encoder-runtime`. As DLLs e licenças são
-artefatos gerados, ignorados pelo Git. A build full shared inclui x264 e é GPL; veja
+artefatos gerados, ignorados pelo Git. O runtime inclui x264 e é GPL; veja
 [NOTICE do runtime](../tools/encode/NOTICE.md) para fontes e condições de redistribuição.
 
 ### Migração da edição antiga

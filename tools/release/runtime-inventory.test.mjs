@@ -10,7 +10,7 @@ test('inventário confronta DLLs e avisos distribuídos com a origem e não apro
   const source = join(directory, 'source'), bundle = join(directory, 'bundle');
   try {
     await mkdir(join(source, 'bin'), { recursive: true }); await mkdir(bundle);
-    for (const name of ['avcodec-62.dll', 'avutil-60.dll', 'swresample-6.dll', 'LICENSE', 'README.txt']) {
+    for (const name of ['avcodec-62.dll', 'avutil-60.dll', 'swresample-6.dll', 'libx264-165.dll', 'libvpl.dll', 'LICENSE', 'README.txt']) {
       const path = join(source, name.endsWith('.dll') ? 'bin' : '', name);
       await writeFile(path, `original ${name}`); await copyFile(path, join(bundle, name));
     }

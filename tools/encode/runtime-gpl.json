@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "name": "madscreen-runtime-gpl",
+  "label": "2026-11-04",
+  "description": "Runtime minimo FFmpeg 760d10603e + x264 (build 165) + AMF + oneVPL, compilado com MSVC. Aplicativo GPL-3.0-or-later.",
+  "archiveName": "madscreen-runtime-gpl-2026-11-04.zip",
+  "url": "https://github.com/vitoradriao/madscreen/releases/download/runtime-2026-11-04/madscreen-runtime-gpl-2026-11-04.zip",
+  "sha256": "244ec9fb7b6ed4b14252ce4dd48b6cd6e034b4d31e46798cfdc1b192a918510e",
+  "ffmpegAbi": "avcodec-62 / avutil-60",
+  "bundleDlls": ["avcodec-62.dll", "avutil-60.dll", "swresample-6.dll", "libx264-165.dll", "libvpl.dll"],
+  "sources": {
+    "releaseTag": "runtime-2026-11-04",
+    "files": {
+      "FFmpeg-760d10603e.tar.gz": "ff042a9908d6cc249559a4038f35490993ce4d49be899a0b5baf1bd158950ea8",
+      "x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.gz": "cd71a7515b0e9a012e1ac9b1f8415bebcaf6fc97d4db32286642ac4c0fbe24f9"
+    }
+  }
+}
