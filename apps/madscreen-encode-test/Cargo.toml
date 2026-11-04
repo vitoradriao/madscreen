@@ -1,0 +1,47 @@
+[package]
+name = "madscreen-encode-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# Publicação LiveKit/Cloudflare (puxa libwebrtc); desligada em builds de bench leves.
+publish = ["dep:madscreen-transport", "dep:madscreen-transport-cf", "dep:madscreen-audio", "dep:tokio"]
+# Somente binario de qualificacao; nunca habilitado no pacote normal.
+diagnostic-lab = ["publish", "madscreen-transport-cf/diagnostic-lab"]
+
+[dependencies]
+madscreen-ipc = { path = "../../crates/madscreen-ipc" }
+madscreen-transport = { path = "../../crates/madscreen-transport", optional = true }
+madscreen-transport-cf = { path = "../../crates/madscreen-transport-cf", optional = true }
+madscreen-audio = { path = "../../crates/madscreen-audio", optional = true }
+madscreen-encode = { path = "../../crates/madscreen-encode" }
+madscreen-capture = { path = "../../crates/madscreen-capture" }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+csv.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = "3.4"
+base64 = "0.22"
+png = "0.17"
+windows-future = "0.3.2"
+windows = { workspace = true, features = [
+    "Foundation", "Graphics_Capture", "Win32_Foundation",
+    "Win32_System_WinRT", "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_Storage_Xps", "Win32_System_Threading",
+] }
+
+[lints.rust]
+unsafe_code = "deny"
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"

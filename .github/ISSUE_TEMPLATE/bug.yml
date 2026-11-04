@@ -1,0 +1,43 @@
+name: Relato de bug
+description: Algo não funciona como esperado
+labels: ["bug"]
+body:
+  - type: textarea
+    id: o-que-aconteceu
+    attributes:
+      label: O que aconteceu
+      description: O que você esperava e o que viu. Prints ajudam; não inclua dados pessoais.
+    validations:
+      required: true
+  - type: textarea
+    id: passos
+    attributes:
+      label: Passos para reproduzir
+      placeholder: "1. Abrir o app\n2. Compartilhar a janela X\n3. ..."
+    validations:
+      required: true
+  - type: input
+    id: versao
+    attributes:
+      label: Versão do app
+      placeholder: "0.1.14"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows (versão e build)
+      placeholder: "Windows 11 23H2 (22631)"
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU, driver e encoder em uso
+      placeholder: "NVIDIA RTX 3060, driver 560.xx, NVENC"
+  - type: textarea
+    id: diagnostico
+    attributes:
+      label: Diagnóstico copiado do app
+      description: "Use \"Copiar diagnóstico\". Ele não contém nomes, tokens, SDP nem endereços."
+      render: text

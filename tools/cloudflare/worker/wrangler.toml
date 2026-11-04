@@ -1,0 +1,76 @@
+# Configuração para `wrangler dev`/`wrangler deploy`. Sem ids nem segredos.
+# O deploy de produção é feito pelo MCP da Cloudflare (deploy-mcp.mjs), que preserva os secrets.
+name = "madscreen-signal"
+main = "dist/worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[build]
+command = "node build.mjs --minify"
+
+[vars]
+# Troque pelo App ID do seu Realtime SFU (Realtime > SFU no painel). Não é segredo.
+CF_REALTIME_APP_ID = "SUBSTITUIR_PELO_APP_ID"
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "HubDO"
+
+[[durable_objects.bindings]]
+name = "STREAM"
+class_name = "StreamDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["HubDO", "StreamDO"]
+deleted_classes = ["RoomDO"]
+
+# v3 a v6: reinícios das salas durante o desenvolvimento (só dados de teste).
+[[migrations]]
+tag = "v3"
+deleted_classes = ["StreamDO"]
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["StreamDO"]
+
+[[migrations]]
+tag = "v5"
+deleted_classes = ["StreamDO"]
+
+[[migrations]]
+tag = "v6"
+new_sqlite_classes = ["StreamDO"]
+
+# v7 e v8: zeram contas e transmissões de teste antes da entrega.
+[[migrations]]
+tag = "v7"
+deleted_classes = ["HubDO", "StreamDO"]
+
+[[migrations]]
+tag = "v8"
+new_sqlite_classes = ["HubDO", "StreamDO"]
+
+# Secrets (wrangler secret put NOME): CF_REALTIME_APP_SECRET, SESSION_SECRET,
+# DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+# TURN_KEY_ID, TURN_KEY_API_TOKEN. Para desenvolvimento local use .dev.vars (ignorado pelo git).
+
+# Ambiente de teste isolado. Não altera o Worker principal nem compartilha seus DOs.
+# Secrets locais em .dev.vars.livekit; crie com configure-livekit.mjs.
+[env.livekit]
+name = "madscreen-signal-livekit-test"
+
+[env.livekit.vars]
+CF_REALTIME_APP_ID = "unused-in-livekit-tests"
+
+[[env.livekit.durable_objects.bindings]]
+name = "HUB"
+class_name = "HubDO"
+
+[[env.livekit.durable_objects.bindings]]
+name = "STREAM"
+class_name = "StreamDO"

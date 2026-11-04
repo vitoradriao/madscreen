@@ -1,0 +1,22 @@
+[package]
+name = "madscreen-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+madscreen-rtc-stats = { path = "../madscreen-rtc-stats" }
+madscreen-ipc = { path = "../madscreen-ipc" }
+anyhow.workspace = true
+tracing.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+livekit = { version = "0.10", features = ["native-tls"] }
+livekit-api = { version = "0.10", default-features = false, features = ["access-token"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"

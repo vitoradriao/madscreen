@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "madscreen",
+  "mainBinaryName": "madscreen-app",
+  "version": "0.1.14",
+  "identifier": "app.madscreen.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "madscreen",
+        "width": 1020,
+        "height": 660,
+        "minWidth": 860,
+        "minHeight": 560,
+        "center": true,
+        "backgroundColor": "#0d0d0d"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' https://cdn.openai.com; img-src 'self' data: blob: https://cdn.discordapp.com https://lh3.googleusercontent.com; media-src 'self' blob: mediastream:; worker-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost ws: wss: http: https:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "publisher": "madscreen",
+    "shortDescription": "Compartilhamento de tela de baixa latencia",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["PortugueseBR"],
+        "displayLanguageSelector": false
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": { "desktop": { "schemes": ["madscreen"] } },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg4QzAwODkxRjdCRjc2QkMKUldTOGRyLzNrUWpBaUgvQ1lrSU9MSTZ6RTdMMFNmaFhvc054MTlqbHZobDA5NTRVZTE5R3NWcm8K",
+      "requireSignedVersion": true,
+      "endpoints": [
+        "https://github.com/vitoradriao/madscreen-releases/releases/latest/download/latest.json"
+      ],
+      "windows": { "installMode": "passive" }
+    }
+  }
+}

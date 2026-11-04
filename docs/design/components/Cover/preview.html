@@ -1,0 +1,54 @@
+<!-- @dsCard height=288 -->
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>madscreen</title>
+<style>
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font-sans); overflow: hidden; }
+  .cover { position: relative; width: 960px; height: 288px; overflow: hidden; }
+  .art { position: absolute; top: 0; left: 480px; width: 480px; height: 288px; overflow: hidden; }
+  .art svg { display: block; width: 520px; height: 288px; }
+  .feat { fill: var(--accent); rx: var(--r-lg); }
+  .side-a { fill: var(--text-2); rx: var(--r-lg); }
+  .side-b { fill: var(--border-strong); rx: var(--r-lg); }
+  .live { fill: var(--accent-fg); rx: 7px; }
+  .tile { fill: none; stroke: var(--border-strong); stroke-width: 1.5; rx: var(--r-sm); }
+  .tile.on { fill: var(--accent); stroke: var(--accent); }
+  .words { position: absolute; left: var(--sp-6); bottom: var(--sp-6); max-width: 440px; }
+  .name { margin: 0; font-size: 80px; line-height: .92; font-weight: 600; letter-spacing: -0.03em; color: var(--text); font-feature-settings: "cv11", "ss03"; }
+  .tag { margin: var(--sp-3) 0 0 3px; font-size: 14px; line-height: 20px; color: var(--text-2); }
+</style>
+</head>
+<body>
+<div class="cover">
+<div class="art" aria-hidden="true">
+<svg viewBox="0 0 520 288" width="520" height="288">
+<!--
+  blocks      accent 320×180 (a live em destaque) · text-2 146×82 · border-strong 146×82, bleeding off the right edge · one accent-fg pill 56×14 cut into the slab (the AO VIVO badge, wordless) — ≈25% of 960×288
+  arrangement the watch grid "featured-first" 7fr/3fr: one 16:9 slab beside two stacked 16:9 satellites, tops on sp-5, gutters sp-4
+  pattern     literal motif, from "o vídeo é o único lugar com cor" + the source picker grid: a row of 16:9 outline tiles (border-strong, 1.5 stroke) at an sp-4 gap, the selected one filled accent
+  scales      gutters sp-4 (16); top inset sp-5 (24); tiles 48×27 at a 64 pitch; corners r-lg on screens, r-sm on tiles, pill r-pill (half of 14)
+-->
+<rect class="feat" x="16" y="24" width="320" height="180" rx="10"/>
+<rect class="live" x="32" y="40" width="56" height="14" rx="7"/>
+<rect class="side-a" x="352" y="24" width="146" height="82" rx="10"/>
+<rect class="side-b" x="352" y="122" width="146" height="82" rx="10"/>
+<rect class="tile" x="16" y="228" width="48" height="27" rx="6"/>
+<rect class="tile" x="80" y="228" width="48" height="27" rx="6"/>
+<rect class="tile on" x="144" y="228" width="48" height="27" rx="6"/>
+<rect class="tile" x="208" y="228" width="48" height="27" rx="6"/>
+<rect class="tile" x="272" y="228" width="48" height="27" rx="6"/>
+<rect class="tile" x="336" y="228" width="48" height="27" rx="6"/>
+<rect class="tile" x="400" y="228" width="48" height="27" rx="6"/>
+<rect class="tile" x="464" y="228" width="48" height="27" rx="6"/>
+</svg>
+</div>
+<div class="words">
+<h1 class="name">madscreen</h1>
+<p class="tag">Compartilhar tela e som por aplicativo, em preto e branco.</p>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,9 @@
+/target/
+/bench-results/
+*.etl
+*.etl.zip
+*.h264
+*.hevc
+/apps/madscreen-app/src-tauri/encoder-runtime/
+/apps/madscreen-app/src-tauri/windows/branding/madscreen-theme.dll
+__pycache__/

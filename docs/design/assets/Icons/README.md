@@ -1,0 +1,1 @@
+Ícones lineares do madscreen (`viewer/shared/icons.ts`): 24×24, traço 1.5, arredondados. Estes arquivos usam traço `#8a8a8a` para aparecer nos dois temas; no produto, insira o path inline com `stroke: currentColor` na classe `.icon`.

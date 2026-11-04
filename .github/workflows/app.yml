@@ -1,0 +1,176 @@
+name: App (instalador Windows)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/madscreen-app/**"
+      - "viewer/**"
+      - "apps/madscreen-encode-test/**"
+      - "crates/**"
+      - "third_party/livekit/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/app.yml"
+      - "tools/encode/**"
+      - "tools/release/**"
+  pull_request:
+    paths:
+      - "apps/madscreen-app/**"
+      - "viewer/**"
+      - "apps/madscreen-encode-test/**"
+      - "crates/**"
+      - "third_party/livekit/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/app.yml"
+      - "tools/encode/**"
+      - "tools/release/**"
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publicar a versao assinada em madscreen-releases"
+        type: boolean
+        default: false
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    env:
+      # Sem a chave (repo sem secret), o build gera so o instalador; com ela, tambem os artefatos do updater.
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Conferir credenciais para publicacao solicitada
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+        env:
+          RELEASE_REPO_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+        run: |
+          if (-not $env:RELEASE_REPO_TOKEN -or -not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw 'Publicacao exige RELEASE_REPO_TOKEN e chave de assinatura configurados.'
+          }
+      - name: Rust stable
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/madscreen-app/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/madscreen-app/package-lock.json
+      - name: Engine (sidecar com captura e publicacao)
+        run: cargo build --release -p madscreen-encode-test --features publish
+      - name: Runtime AMF, QuickSync e CPU (versao e SHA-256 fixos)
+        run: ./tools/encode/prepare-runtime.ps1 -BundleDestination apps/madscreen-app/src-tauri/encoder-runtime
+      - name: Inventario do runtime e bloqueio de configuracao nonfree (app GPL-3.0-or-later)
+        run: |
+          $releaseVersion = (Get-Content apps/madscreen-app/src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $auditArguments = @('tools/release/runtime-audit.mjs', 'target/encoder-runtime/ffmpeg-8.1.2-full_build-shared/bin/ffmpeg.exe', 'target/runtime-distribution.json', '--policy', 'gpl-open-source', '--require-encoders', 'h264_amf,h264_qsv,libx264')
+          if ($releaseVersion -match '^[1-9][0-9]*\.') { $auditArguments += '--strict' }
+          & node @auditArguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Conferir DLLs e avisos efetivamente empacotados
+        run: |
+          node tools/release/runtime-inventory.mjs target/encoder-runtime/ffmpeg-8.1.2-full_build-shared apps/madscreen-app/src-tauri/encoder-runtime target/runtime-inventory.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Guardar inventario para revisao
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-distribution
+          path: |
+            target/runtime-distribution.json
+            target/runtime-inventory.json
+          if-no-files-found: ignore
+      - name: Copiar sidecar com o triple do alvo
+        run: |
+          New-Item -ItemType Directory -Force apps/madscreen-app/src-tauri/binaries | Out-Null
+          Copy-Item target/release/madscreen-encode-test.exe apps/madscreen-app/src-tauri/binaries/madscreen-encode-test-x86_64-pc-windows-msvc.exe
+      - name: Dependencias e build do frontend
+        working-directory: apps/madscreen-app
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm ci --prefix ../../viewer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+      - name: Regressao do viewer e atualizacao na interface
+        run: |
+          npm test --prefix viewer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:browser --prefix viewer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Testes do manifesto de atualizacao
+        run: node --test tools/release/*.test.mjs
+      - name: Formatacao, clippy e testes do app
+        working-directory: apps/madscreen-app/src-tauri
+        run: |
+          cargo fmt --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --all-targets --features diagnostic-lab -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test
+      - name: Instalador NSIS
+        working-directory: apps/madscreen-app
+        run: |
+          # O frontend ja foi compilado antes dos checks Rust. Arquivo evita escapes JSON no cmd.
+          $bundleConfigPath = Join-Path $env:RUNNER_TEMP 'madscreen-bundle.json'
+          @{
+            build = @{ beforeBuildCommand = '' }
+            bundle = @{ createUpdaterArtifacts = [bool]$env:TAURI_SIGNING_PRIVATE_KEY }
+          } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $bundleConfigPath -Encoding utf8
+          npx tauri build --bundles nsis --config $bundleConfigPath
+      - name: Manifesto e verificacao criptografica
+        if: ${{ env.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          node tools/release/manifest.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $releaseVersion = (Get-Content apps/madscreen-app/src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $installerPath = "apps/madscreen-app/src-tauri/target/release/bundle/nsis/madscreen_${releaseVersion}_x64-setup.exe"
+          cargo run --manifest-path apps/madscreen-app/src-tauri/Cargo.toml --example verify-update -- target/release-manifest/latest.json $installerPath apps/madscreen-app/src-tauri/tauri.conf.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Publicar instalador
+        uses: actions/upload-artifact@v4
+        with:
+          name: madscreen-setup-windows-x64
+          path: |
+            apps/madscreen-app/src-tauri/target/release/bundle/nsis/*.exe
+            apps/madscreen-app/src-tauri/target/release/bundle/nsis/*.sig
+            target/release-manifest/latest.json
+            target/release-manifest/SHA256SUMS.txt
+          retention-days: 14
+          if-no-files-found: error
+      - name: Publicar release assinada sem expor o codigo privado
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+        run: |
+          $releaseVersion = (Get-Content apps/madscreen-app/src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $releaseTag = "v$releaseVersion"
+          $installerPath = "apps/madscreen-app/src-tauri/target/release/bundle/nsis/madscreen_${releaseVersion}_x64-setup.exe"
+          # URL fixa para convites: os bytes e a assinatura sao os mesmos do pacote versionado.
+          $downloadAlias = 'target/release-manifest/madscreen-setup.exe'
+          Copy-Item -LiteralPath $installerPath -Destination $downloadAlias
+          Copy-Item -LiteralPath "$installerPath.sig" -Destination "$downloadAlias.sig"
+          $aliasHash = (Get-FileHash -LiteralPath $downloadAlias -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$aliasHash  madscreen-setup.exe" | Set-Content -LiteralPath "$downloadAlias.sha256" -Encoding utf8
+          $releaseNotes = "docs/releases/$releaseVersion.md"
+          if (-not (Test-Path -LiteralPath $releaseNotes)) { throw 'Notas de release ausentes.' }
+          gh release view $releaseTag --repo vitoradriao/madscreen-releases 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'A release ja existe; nao sera sobrescrita.' }
+          gh release create $releaseTag --repo vitoradriao/madscreen-releases --draft --title "madscreen $releaseVersion" --notes-file $releaseNotes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release upload $releaseTag --repo vitoradriao/madscreen-releases $installerPath "$installerPath.sig" target/release-manifest/latest.json target/release-manifest/SHA256SUMS.txt $downloadAlias "$downloadAlias.sig" "$downloadAlias.sha256"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release edit $releaseTag --repo vitoradriao/madscreen-releases --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

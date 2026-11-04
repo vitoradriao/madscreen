@@ -1,0 +1,26 @@
+{
+  "family": "OpenAI Sans",
+  "source": "CDN oficial OpenAI",
+  "files": [
+    {
+      "file": "OpenAISans-Bold.woff2",
+      "url": "https://cdn.openai.com/common/fonts/openai-sans/v2/OpenAISans-Bold.woff2",
+      "sha256": "950a34c04a54b0129c6b11a0ed17d6fe0efbba8c5caacad3c543e4f870471fc9"
+    },
+    {
+      "file": "OpenAISans-Medium.woff2",
+      "url": "https://cdn.openai.com/common/fonts/openai-sans/v2/OpenAISans-Medium.woff2",
+      "sha256": "eedca9d3e2e3ba3742b74aa828d5ac3000675157d8eb1902241b4be554e82907"
+    },
+    {
+      "file": "OpenAISans-Regular.woff2",
+      "url": "https://cdn.openai.com/common/fonts/openai-sans/v2/OpenAISans-Regular.woff2",
+      "sha256": "5759128226d9323238d7ea0c94c4c1c4f16391cb05cdbd4eecadc1d80a9aed0a"
+    },
+    {
+      "file": "OpenAISans-Semibold.woff2",
+      "url": "https://cdn.openai.com/common/fonts/openai-sans/v2/OpenAISans-Semibold.woff2",
+      "sha256": "fee91812b2492934c7cb3cdebb97e0be557f1498e1a62df61e583b3baa57fa01"
+    }
+  ]
+}

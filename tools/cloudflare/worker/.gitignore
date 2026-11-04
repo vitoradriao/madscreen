@@ -1,0 +1,9 @@
+node_modules/
+dist/
+deploy*.generated.mjs
+.dev.vars
+.dev.vars.*
+.wrangler/
+.env
+*.secret
+src/*.generated.ts

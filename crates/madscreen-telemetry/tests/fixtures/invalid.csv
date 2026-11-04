@@ -1,0 +1,10 @@
+Application,FrameTime,GPUBusy
+game.exe,10,5
+game.exe,broken,4
+game.exe,NaN,5
+game.exe,-1,5
+game.exe,0,5
+game.exe,inf,5
+game.exe,20,NA
+game.exe,30,bad
+game.exe,40,4,extra

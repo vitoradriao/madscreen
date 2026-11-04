@@ -1,0 +1,20 @@
+name: Sugestão ou experimento
+description: Uma melhoria ou algo que vale avaliar
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problema
+    attributes:
+      label: Qual problema isto resolve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposta
+    attributes:
+      label: Proposta
+      description: Como você imagina a solução, e o que ela não deve prejudicar (principalmente o FPS do jogo).
+  - type: textarea
+    id: medicao
+    attributes:
+      label: Como saberíamos que funcionou
+      description: Qual medição ou teste mostraria o ganho (hardware, cenário e métrica).

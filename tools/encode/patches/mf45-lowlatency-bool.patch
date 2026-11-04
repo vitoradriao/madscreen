@@ -1,0 +1,34 @@
+--- a/libavcodec/mfenc.c
++++ b/libavcodec/mfenc.c
+@@ -877,8 +877,29 @@
+         if (c->opt_enc_scenario >= 0)
+             ICodecAPI_SetValue(c->codec_api, &ff_CODECAPI_AVScenarioInfo, FF_VAL_VT_UI4(c->opt_enc_scenario));
+
+-        if (avctx->flags & AV_CODEC_FLAG_LOW_DELAY)
+-            ICodecAPI_SetValue(c->codec_api, &ff_CODECAPI_AVLowLatencyMode, FF_VAL_VT_UI4(1));
++        if (avctx->flags & AV_CODEC_FLAG_LOW_DELAY) {
++            if (avctx->codec_id == AV_CODEC_ID_H264) {
++                VARIANT value;
++                HRESULT hr;
++                int enabled;
++                /* H.264 requires VT_BOOL; VT_UI4 is rejected by the Microsoft MFT. */
++                hr = ICodecAPI_SetValue(c->codec_api, &ff_CODECAPI_AVLowLatencyMode,
++                                        FF_VAL_VT_BOOL(VARIANT_TRUE));
++                av_log(avctx, AV_LOG_INFO, "H264 low latency SetValue HRESULT=0x%08lx\n", (unsigned long)hr);
++                if (FAILED(hr))
++                    return AVERROR_EXTERNAL;
++                VariantInit(&value);
++                hr = ICodecAPI_GetValue(c->codec_api, &ff_CODECAPI_AVLowLatencyMode, &value);
++                enabled = SUCCEEDED(hr) && V_VT(&value) == VT_BOOL && V_BOOL(&value) != VARIANT_FALSE;
++                av_log(avctx, AV_LOG_INFO, "H264 low latency GetValue HRESULT=0x%08lx type=%u enabled=%d\n",
++                       (unsigned long)hr, (unsigned)V_VT(&value), enabled);
++                VariantClear(&value);
++                if (!enabled)
++                    return AVERROR_EXTERNAL;
++            } else {
++                ICodecAPI_SetValue(c->codec_api, &ff_CODECAPI_AVLowLatencyMode, FF_VAL_VT_UI4(1));
++            }
++        }
+     }
+
+     return 0;

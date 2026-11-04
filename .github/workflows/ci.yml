@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust stable e componentes
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatação
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --workspace --all-targets
+      - name: Testes
+        run: cargo test --workspace
+      - name: Transporte completo (SDK LiveKit e Worker)
+        run: |
+          cargo clippy -p madscreen-encode-test --all-targets --features diagnostic-lab -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p madscreen-encode-test --features publish
+      - name: Runtime de codecs e teste CPU sem GPU
+        shell: pwsh
+        run: |
+          ./tools/encode/prepare-runtime.ps1 -BundleDestination target/release/encoder-runtime
+          $env:MADSCREEN_ENCODER_RUNTIME = (Resolve-Path target/release/encoder-runtime).Path
+          cargo test -p madscreen-encode runtime_cpu_fallback_keyframe_and_rate -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build da prévia para download
+        run: cargo build --release -p madscreen-preview
+      - name: Executável da prévia Windows x64
+        uses: actions/upload-artifact@v4
+        with:
+          name: madscreen-preview-windows-x64
+          path: target/release/madscreen-preview.exe
+          retention-days: 14
+          if-no-files-found: error
+      - name: Build do teste de encoders para download
+        run: cargo build --release -p madscreen-encode-test
+      - name: Probe dos encoders sem exigir GPU
+        run: .\target\release\madscreen-encode-test.exe --probe
+      - name: Executável e runtime de encoders Windows x64
+        uses: actions/upload-artifact@v4
+        with:
+          name: madscreen-encode-test-windows-x64
+          path: |
+            target/release/madscreen-encode-test.exe
+            target/release/encoder-runtime/
+          retention-days: 14
+          if-no-files-found: error
+      # Runner hospedado não tem GPU. Benchmark real só em runner self-hosted/manual.
+      # Capturas curtas e sintéticas verificam o fluxo, não o aceite do M0.3.
+      - name: Smoke Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & tools/bench/run_bench.ps1 -DryRun -DurationSec 2 -Seed 42 -OutDir bench-results/smoke-ps51
+          cargo run -p madscreen-bench -- analyze bench-results/smoke-ps51 --strict
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke PowerShell 7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & tools/bench/run_bench.ps1 -DryRun -DurationSec 2 -Seed 42 -OutDir bench-results/smoke-ps7
+          cargo run -p madscreen-bench -- analyze bench-results/smoke-ps7 --strict
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

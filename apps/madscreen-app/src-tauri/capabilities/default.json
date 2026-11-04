@@ -1,0 +1,27 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissoes da janela principal",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "deep-link:default",
+    "core:window:allow-hide",
+    "core:window:allow-minimize",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-fullscreen",
+    "updater:default",
+    "process:allow-restart",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://*.workers.dev/*"
+        }
+      ]
+    }
+  ]
+}

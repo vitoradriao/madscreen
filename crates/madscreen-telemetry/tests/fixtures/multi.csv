@@ -1,0 +1,7 @@
+Application,ProcessID,SwapChainAddress,CPUStartTime,GPUBusy
+GAME.exe,1,0x1,1000,4
+other.exe,2,0x2,1001,5
+GAME.exe,1,0x1,1010,6
+other.exe,2,0x2,1011,7
+GAME.exe,1,0x3,1015,8
+GAME.exe,1,0x3,1035,9

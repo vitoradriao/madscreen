@@ -1,0 +1,4 @@
+Application,TimeInSeconds,MsBetweenPresents
+game.exe,0,10
+game.exe,0.02,20
+game.exe,0.05,30

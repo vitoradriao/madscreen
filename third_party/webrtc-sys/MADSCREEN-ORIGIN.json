@@ -1,0 +1,8 @@
+{
+  "crate": "webrtc-sys",
+  "version": "0.3.52",
+  "archiveSha256": "bae66695bde7b250a9e5f7976db6015e30fa06033afc1745e5499d55aa51612a",
+  "upstreamRevision": "ede8ac53843a8fb91d6f4fb5629f5245f1758e38",
+  "license": "Apache-2.0",
+  "changeScope": "H264 High passthrough capability and sendable implementation, restricted to advertised H264 formats without a real implementation; opt-in bounded native diagnostics; no Cargo registry modifications"
+}

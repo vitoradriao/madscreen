@@ -1,0 +1,17 @@
+[package]
+name = "madscreen-rtc-stats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+libwebrtc = "=0.3.55"
+madscreen-ipc = { path = "../madscreen-ipc" }
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

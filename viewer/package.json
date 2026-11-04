@@ -1,0 +1,12 @@
+{
+  "name": "madscreen-viewer",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": { "test": "node test.mjs", "test:browser": "node browser-test.mjs", "test:media": "node media-test.mjs" },
+  "dependencies": {
+    "livekit-client": "2.23.0"
+  },
+  "devDependencies": { "esbuild": "^0.25.0" }
+}

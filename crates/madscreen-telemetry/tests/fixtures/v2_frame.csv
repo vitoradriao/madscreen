@@ -1,0 +1,4 @@
+Application,FrameTime,GPUBusy,GPUWait,CPUBusy,DisplayLatency,DisplayedTime,PresentMode,AllowsTearing
+game.exe,10,4,1,2,8,10,Composed: Flip,1
+game.exe,20,6,2,3,9,20,Hardware: Independent Flip,0
+game.exe,30,8,3,4,10,0,Composed: Flip,1

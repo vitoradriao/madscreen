@@ -1,0 +1,36 @@
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+const root=fileURLToPath(new URL("../../",import.meta.url));
+const config=path.join(root,"apps/madscreen-app/src-tauri/tauri.conf.json");
+const version=JSON.parse(await readFile(config,"utf8")).version;
+const args=process.argv.slice(2);
+if(args.length!==0&&args.length!==3)throw Error("Uso: node tools/release/verify-smoke.mjs [manifesto instalador pasta-nova]");
+const artifact=args.length?path.resolve(args[1]):path.join(root,`apps/madscreen-app/src-tauri/target/release/bundle/nsis/madscreen_${version}_x64-setup.exe`);
+const manifest=args.length?path.resolve(args[0]):path.join(root,"target/release-manifest/latest.json");
+const verifier=path.join(root,"apps/madscreen-app/src-tauri/target/debug/examples/verify-update.exe");
+const out=args.length?path.resolve(args[2]):path.join(root,"bench-results/update-validation");
+await mkdir(out,args.length?undefined:{recursive:true});
+const run=(name,manifestPath,artifactPath,shouldPass)=>{
+  const result=spawnSync(verifier,[manifestPath,artifactPath,config],{encoding:"utf8",windowsHide:true});
+  if(result.error||((result.status===0)!==shouldPass))throw Error(`Verificação inesperada: ${name}. Confira se manifesto e instalador pertencem à mesma candidata.`);
+  return {name,accepted:result.status===0,expected:shouldPass};
+};
+const checks=[run("pacote e versão originais",manifest,artifact,true)];
+const changedVersion=JSON.parse(await readFile(manifest,"utf8"));changedVersion.version="99.0.0";
+const versionPath=path.join(out,"tampered-version.json");await writeFile(versionPath,JSON.stringify(changedVersion));
+checks.push(run("versão anunciada adulterada",versionPath,artifact,false));
+const changedSignature=JSON.parse(await readFile(manifest,"utf8"));
+const signed=Buffer.from(changedSignature.platforms["windows-x86_64"].signature,"base64").toString("utf8").split(/\r?\n/);
+const bytes=Buffer.from(signed[1],"base64");bytes[20]^=1;signed[1]=bytes.toString("base64");
+changedSignature.platforms["windows-x86_64"].signature=Buffer.from(signed.join("\n")).toString("base64");
+const signaturePath=path.join(out,"tampered-signature.json");await writeFile(signaturePath,JSON.stringify(changedSignature));
+checks.push(run("assinatura adulterada",signaturePath,artifact,false));
+const changedArtifact=Buffer.from(await readFile(artifact));changedArtifact[Math.floor(changedArtifact.length/2)]^=1;
+const artifactPath=path.join(out,"tampered-installer.bin");await writeFile(artifactPath,changedArtifact);
+checks.push(run("conteúdo do pacote adulterado",manifest,artifactPath,false));
+const manifestVersion=JSON.parse(await readFile(manifest,"utf8")).version;
+const result={ok:true,version:manifestVersion,checks,installerExecuted:false};
+await writeFile(path.join(out,"signature-checks.json"),JSON.stringify(result,null,2)+"\n");console.log(JSON.stringify(result,null,2));

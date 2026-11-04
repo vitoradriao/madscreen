@@ -1,0 +1,4 @@
+Application,ProcessID,SwapChainAddress,CPUStartTime,CPUBusy,CPUWait,GPUBusy,GPUWait,DisplayLatency,DisplayedTime,PresentMode,AllowsTearing
+game.exe,1,0x1,1000,3,7,5,1,8,10,Composed: Flip,1
+game.exe,1,0x1,1010,4,16,6,2,9,20,Composed: Flip,1
+game.exe,1,0x1,1030,5,25,7,3,10,30,Composed: Flip,0

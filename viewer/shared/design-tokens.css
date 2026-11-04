@@ -1,0 +1,120 @@
+/* madscreen — gerado a partir de tokens.json. Não edite à mão. */
+
+:root, [data-theme="dark"] {
+  --bg-rail: #000000;
+  --bg: #0b0b0b;
+  --bg-sidebar: #0f0f0f;
+  --surface-1: #141414;
+  --surface-2: #1a1a1a;
+  --surface-3: #1f1f1f;
+  --surface-4: #262626;
+  --video-bg: #000000;
+  --on-video: #a8a8a8;
+  --overlay: rgba(0, 0, 0, 0.6);
+  --scrim: rgba(0, 0, 0, 0.85);
+  --backdrop: #000000cc;
+  --border: #242424;
+  --border-strong: #777777;
+  --border-hover: #a0a0a0;
+  --focus: #ffffff;
+  --text: #f5f5f5;
+  --text-2: #b8b8b8;
+  --text-3: #9a9a9a;
+  --text-inverse: #0b0b0b;
+  --accent: #ffffff;
+  --accent-hover: #e6e6e6;
+  --accent-fg: #000000;
+  --shadow-floating: 0 16px 48px #000000a0;
+}
+
+[data-theme="light"] {
+  --bg-rail: #e9e9e9;
+  --bg: #fafafa;
+  --bg-sidebar: #f3f3f3;
+  --surface-1: #ffffff;
+  --surface-2: #f2f2f2;
+  --surface-3: #ebebeb;
+  --surface-4: #e2e2e2;
+  --video-bg: #000000;
+  --on-video: #a8a8a8;
+  --overlay: rgba(0, 0, 0, 0.6);
+  --scrim: rgba(0, 0, 0, 0.85);
+  --backdrop: #00000059;
+  --border: #e3e3e3;
+  --border-strong: #737373;
+  --border-hover: #4d4d4d;
+  --focus: #0b0b0b;
+  --text: #0b0b0b;
+  --text-2: #454545;
+  --text-3: #5c5c5c;
+  --text-inverse: #fafafa;
+  --accent: #0b0b0b;
+  --accent-hover: #2b2b2b;
+  --accent-fg: #ffffff;
+  --shadow-floating: 0 12px 40px #0000001f;
+}
+
+[data-theme="contrast"] {
+  --bg-rail: #000000;
+  --bg: #000000;
+  --bg-sidebar: #000000;
+  --surface-1: #000000;
+  --surface-2: #141414;
+  --surface-3: #1f1f1f;
+  --surface-4: #2e2e2e;
+  --video-bg: #000000;
+  --on-video: #d4d4d4;
+  --overlay: rgba(0, 0, 0, 0.85);
+  --scrim: rgba(0, 0, 0, 0.92);
+  --backdrop: #000000e0;
+  --border: #8a8a8a;
+  --border-strong: #d4d4d4;
+  --border-hover: #ffffff;
+  --focus: #ffffff;
+  --text: #ffffff;
+  --text-2: #e0e0e0;
+  --text-3: #c8c8c8;
+  --text-inverse: #000000;
+  --accent: #ffffff;
+  --accent-hover: #e6e6e6;
+  --accent-fg: #000000;
+  --shadow-floating: none;
+}
+
+:root {
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 28px;
+  --sp-7: 48px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+  --control-h: 38px;
+  --control-h-sm: 30px;
+  --control-h-lg: 46px;
+  --avatar: 40px;
+  --avatar-sm: 32px;
+  --icon: 18px;
+  --rail-w: 64px;
+  --topbar-h: 64px;
+  --members-w: 248px;
+  --fs-2xs: 11px;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-name: 15px;
+  --fs-lg: 16px;
+  --fs-xl: 18px;
+  --fs-2xl: 22px;
+  --fs-display: 40px;
+  --fs-stat: 44px;
+  --disabled: 0.4;
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
+}
+
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 100 900; font-display: swap; src: url("./fonts/inter.woff2") format("woff2"); }

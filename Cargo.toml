@@ -1,0 +1,37 @@
+[workspace]
+members = ["crates/madscreen-telemetry", "apps/madscreen-bench", "crates/madscreen-capture", "apps/madscreen-preview", "crates/madscreen-encode", "apps/madscreen-encode-test", "crates/madscreen-transport", "crates/madscreen-transport-cf", "crates/madscreen-ipc", "crates/madscreen-audio", "crates/madscreen-rtc-stats"]
+resolver = "3"
+exclude = ["third_party/livekit"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "=4.5.53", features = ["derive", "env"] }
+csv = "1.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tempfile = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+windows = "0.62.2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+
+[patch.crates-io]
+# 0.10.0 omits TfStereo when publishing a stereo native audio source (upstream #1018).
+livekit = { path = "third_party/livekit" }
+
+# Native passthrough capabilities must include the external encoder High profile.
+webrtc-sys = { path = "third_party/webrtc-sys" }

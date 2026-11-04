@@ -1,0 +1,19 @@
+{
+  "build": {
+    "beforeBundleCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../tools/ui/build-installer-theme.ps1"
+  },
+  "bundle": {
+    "externalBin": ["binaries/madscreen-encode-test"],
+    "resources": { "encoder-runtime/": "encoder-runtime/" },
+    "windows": {
+      "nsis": {
+        "template": "windows/installer.nsi",
+        "installerHooks": "windows/hooks.nsh",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "windows/branding/header.bmp",
+        "sidebarImage": "windows/branding/sidebar.bmp"
+      }
+    }
+  }
+}
