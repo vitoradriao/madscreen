@@ -473,6 +473,15 @@ try {
   check(changingHost.count===2&&requests.filter(item=>item.path==="/api/watch/start"&&item.body.owner==="bob").length===beforeRepublish+1&&changingHost.root.querySelector("video")!.srcObject,"Espectador retoma automaticamente após publicação com nova qualidade ou fonte");
   check(unaffectedRoom.state==="connected"&&changingHost.root.querySelectorAll("video")[1]!.srcObject===unaffectedStream,"Retomada da nova geração preserva conexão e mídia da outra tela");
   changingHost.dispose();changingHost.root.remove();
+  let endedLeft=0;
+  const endingHost=createWatchLayout(client,{endedLeaveMs:60,onLeave:()=>{endedLeft++;}});document.body.append(endingHost.root);
+  endingHost.watch({username:"bob",displayName:"Bob"});await flush();sendTracks("bob");await flush();
+  const endingSocket=Socket.instances.findLast(socket=>new URL(socket.url).searchParams.get("owner")==="bob")!;
+  endingSocket.onmessage({data:JSON.stringify({type:"ended",generation:4})});await flush();
+  check(endingHost.count===1&&endedLeft===0,"Fim da live aguarda a tolerância antes de sair");
+  await new Promise(resolve=>setTimeout(resolve,150));await flush();
+  check(endingHost.count===0&&endedLeft===1,"Espectador sai sozinho quando a live termina e não volta");
+  endingHost.dispose();endingHost.root.remove();
   await checkMiniPlayerLayout(client,sendTracks,check,flush);
   const final=createWatchLayout(client);document.body.append(final.root);
   final.watch({username:"bob",displayName:"Bob · LiveKit"});await flush();sendTracks("bob");
