@@ -32,6 +32,26 @@ function Compare-SmokePayload {
     $extra = @($Actual.Keys | Where-Object { $_ -ne 'uninstall.exe' -and -not $Expected.ContainsKey($_) })
     return @{ ok = ($missing.Count + $different.Count + $extra.Count -eq 0); missing = $missing; different = $different; extra = $extra }
 }
+function Get-SmokePayloadEvidence {
+    param([hashtable]$Expected, [hashtable]$Actual, [hashtable]$Previous)
+    return ,@($Expected.Keys | Sort-Object | ForEach-Object {
+        $name = $_
+        @{ file = $name; packagedSha256 = $Expected[$name]; installedSha256 = $Actual[$name];
+            previousSha256 = $Previous[$name]; retainedPrevious = ($Previous.ContainsKey($name) -and
+                $Expected[$name] -ne $Previous[$name] -and $Actual[$name] -eq $Previous[$name]) }
+    })
+}
+function Get-SmokeErrorDetail {
+    param($Record, [string]$Code, [string[]]$Roots)
+    $message = [string]$Record.Exception.Message
+    $message = [regex]::Replace($message, '(?i)(?:[a-z]:[\\/]|\\\\)[^\r\n"'';]+', '[path]')
+    foreach ($root in @($Roots | Where-Object { $_ } | Sort-Object Length -Descending)) {
+        $message = [regex]::Replace($message, [regex]::Escape($root), '[path]', 'IgnoreCase')
+    }
+    # Redige tambem caminhos nao conhecidos (inclusive UNC); conserva motivo/exit code.
+    return @{ code = $Code; errorType = $Record.Exception.GetType().Name;
+        message = $message; scriptLine = $Record.InvocationInfo.ScriptLineNumber }
+}
 function Get-SmokeSidecarDiagnostic {
     param([string]$Text)
     $code = 'sidecar-failed'
@@ -84,9 +104,9 @@ if (-not (Test-SmokePermission $env:GITHUB_ACTIONS $IUnderstandThisInstalls.IsPr
 }
 
 $result = [ordered]@{ schema = 1; ok = $false; upgrade = 'sem-upgrade'; steps = @() }
-$stage = 'inputs'; $ready = $false; $attemptedInstall = $false; $installRoot = $null; $contract = $null
+$stage = 'inputs'; $ready = $false; $attemptedInstall = $false; $installRoot = $null; $contract = $null; $workRoot = $null; $repoRoot = $null
 function Add-SmokeStep { param([string]$Name, [bool]$Ok, $Detail); $script:result.steps += @{ stage = $Name; ok = $Ok; detail = $Detail } }
-function Assert-Smoke { param([bool]$Value); if (-not $Value) { throw 'Verificacao do smoke falhou' } }
+function Assert-Smoke { param([bool]$Value, [string]$Reason = 'Verificacao do smoke falhou'); if (-not $Value) { throw $Reason } }
 function Get-SmokeTree {
     param([string]$Root)
     Assert-Smoke (-not ((Get-Item -LiteralPath $Root).Attributes -band [IO.FileAttributes]::ReparsePoint))
@@ -124,7 +144,7 @@ function Invoke-SmokeProcess {
         $null = $process.Handle # Manter handle aberto para ler ExitCode tambem no Windows PowerShell5.1.
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) { $process.Kill(); throw 'Timeout do processo proprio' }
         $process.Refresh()
-        Assert-Smoke ($process.ExitCode -eq 0)
+        Assert-Smoke ($process.ExitCode -eq 0) "Processo NSIS terminou com exit code $($process.ExitCode)"
     } finally { $process.Dispose() }
 }
 function Confirm-SmokeRegistration {
@@ -151,11 +171,12 @@ function Remove-SmokeInstallation {
     # _?= aguarda a execucao no lugar; NSIS nao consegue apagar o proprio EXE aberto.
     $left = @{}
     if (Test-Path -LiteralPath $script:installRoot) { $left = Get-SmokeTree $script:installRoot }
-    Assert-Smoke (@($left.Keys | Where-Object { $_ -ne 'uninstall.exe' }).Count -eq 0)
+    $remaining = @($left.Keys | Where-Object { $_ -ne 'uninstall.exe' })
+    Assert-Smoke ($remaining.Count -eq 0) "Payload remanescente apos desinstalar: $($remaining -join ', ')"
     if (Test-Path -LiteralPath $uninstaller) { Remove-Item -LiteralPath $uninstaller -Force }
     foreach ($hive in @('CurrentUser', 'LocalMachine')) {
-        foreach ($key in @($script:contract.uninstallKey, $script:contract.locationKey, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\madscreen viewer')) {
-            Assert-Smoke (@(Get-SmokeRegistration $hive $key).Count -eq 0)
+        foreach ($key in @($script:contract.uninstallKey, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\madscreen viewer')) {
+            Assert-Smoke (@(Get-SmokeRegistration $hive $key).Count -eq 0) "Chave de desinstalacao remanescente: $hive/$key"
         }
     }
     # Apenas diretorios ja vazios; nunca limpar payload residual com -Recurse.
@@ -166,7 +187,8 @@ function Remove-SmokeInstallation {
         Remove-Item -LiteralPath $script:installRoot -ErrorAction Stop
     }
     Assert-Smoke (-not (Test-Path -LiteralPath $script:installRoot))
-    Add-SmokeStep 'uninstall' $true @{ payloadRemoved = $true; registryRemoved = $true; inPlaceUninstallerRemoved = $true }
+    Add-SmokeStep 'uninstall' $true @{ payloadRemoved = $true; uninstallRegistryRemoved = $true; inPlaceUninstallerRemoved = $true;
+        installLocationPreferencePreserved = (@(Get-SmokeRegistration CurrentUser $script:contract.locationKey).Count -gt 0) }
 }
 
 try {
@@ -180,12 +202,12 @@ try {
     $config = Get-Content -LiteralPath (Join-Path $appRoot 'tauri.conf.json') -Raw | ConvertFrom-Json
     $windowsConfig = Get-Content -LiteralPath (Join-Path $appRoot 'tauri.windows.conf.json') -Raw | ConvertFrom-Json
     $contract = Get-SmokeContract $config $windowsConfig (Get-Content -LiteralPath (Join-Path $appRoot 'windows/installer.nsi') -Raw) (Get-Content -LiteralPath (Join-Path $appRoot 'windows/hooks.nsh') -Raw)
-    $newVersion = Convert-SmokeVersion $config.version
     $Installer = (Get-Item -LiteralPath $Installer -ErrorAction Stop).FullName
     Assert-Smoke ($Installer.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase))
-    Assert-Smoke ((Convert-SmokeVersion (Get-Item -LiteralPath $Installer).VersionInfo.ProductVersion) -eq $newVersion)
+    $newVersion = Convert-SmokeVersion (Get-Item -LiteralPath $Installer).VersionInfo.ProductVersion
+    $displayVersion = '{0}.{1}.{2}' -f $newVersion.Major, $newVersion.Minor, $newVersion.Build
     $result.installerSha256 = Get-SmokeHash $Installer
-    Add-SmokeStep 'inputs' $true @{ installMode = $contract.mode; installDirectory = '[work]/installed'; uninstallHive = 'HKCU'; uninstallKey = $contract.uninstallKey; version = $config.version }
+    Add-SmokeStep 'inputs' $true @{ installMode = $contract.mode; installDirectory = '[work]/installed'; uninstallHive = 'HKCU'; uninstallKey = $contract.uninstallKey; version = $displayVersion }
 
     $stage = 'clean-machine'
     foreach ($hive in @('CurrentUser', 'LocalMachine')) {
@@ -197,18 +219,40 @@ try {
     Assert-Smoke (@(Get-Process -Name 'madscreen-app', 'madscreen-encode-test' -ErrorAction SilentlyContinue).Count -eq 0)
     Add-SmokeStep $stage $true 'Nenhuma instalacao/registro/processo preexistente; destino reservado novo'
 
+    # Referencia autoritativa: os bytes que O PROPRIO instalador novo instala, sem build local.
+    # Mesmo destino elimina diferencas legitimas dependentes de caminho. Nao abrir o app.
+    $stage = 'install-new-clean'; $attemptedInstall = $true
+    Invoke-SmokeProcess $Installer (Get-SmokeArguments $installRoot)
+    Confirm-SmokeRegistration $newVersion $displayVersion
+    $expected = Get-SmokeTree $installRoot
+    Assert-Smoke ($expected.ContainsKey('uninstall.exe')) 'Instalacao limpa sem desinstalador'
+    $expected.Remove('uninstall.exe')
+    Add-SmokeStep $stage $true @{ files = $expected.Count; payloadSha256 = $expected; source = 'new-installer-clean-install' }
+    $buildExe = Join-Path $appRoot "target/release/$($contract.main)"
+    if (Test-Path -LiteralPath $buildExe) {
+        $buildHash = Get-SmokeHash $buildExe
+        Add-SmokeStep 'build-comparison-diagnostic' $true @{ file = $contract.main; buildSha256 = $buildHash;
+            packagedSha256 = $expected[$contract.main]; equal = ($buildHash -eq $expected[$contract.main]); authoritative = $false }
+    }
+    $stage = 'uninstall-clean-reference'; Remove-SmokeInstallation; $attemptedInstall = $false
+
     $stage = 'runtime-reference'
     $manifest = Get-Content -LiteralPath (Join-Path $repoRoot 'tools/encode/runtime-gpl.json') -Raw | ConvertFrom-Json
     $archive = Join-Path (Join-Path $repoRoot 'target/encoder-runtime') $manifest.archiveName
-    Assert-Smoke ((Get-SmokeHash $archive) -eq $manifest.sha256)
+    if (-not (Test-Path -LiteralPath $archive)) {
+        $archive = Join-Path $workRoot $manifest.archiveName
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $client = New-Object Net.WebClient
+        try { $client.DownloadFile($manifest.url, $archive) } finally { $client.Dispose() }
+    }
+    Assert-Smoke ((Get-SmokeHash $archive) -eq $manifest.sha256) 'SHA256 do ZIP de runtime divergente'
     $reference = Join-Path $workRoot 'runtime-reference'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::ExtractToDirectory($archive, $reference)
-    $bundleRoot = Join-Path $appRoot 'encoder-runtime'
-    $expected = @{ 'madscreen-encode-test.exe' = (Get-SmokeHash (Join-Path $appRoot 'binaries/madscreen-encode-test-x86_64-pc-windows-msvc.exe')) }
-    $expected[$contract.main] = Get-SmokeHash (Join-Path $appRoot "target/release/$($contract.main)")
-    $bundleTree = Get-SmokeTree $bundleRoot
-    foreach ($name in $bundleTree.Keys) { $expected["encoder-runtime/$name"] = $bundleTree[$name] }
+    $bundleTree = @{}
+    foreach ($name in $expected.Keys) {
+        if ($name.StartsWith('encoder-runtime/')) { $bundleTree[$name.Substring('encoder-runtime/'.Length)] = $expected[$name] }
+    }
     foreach ($dll in $manifest.bundleDlls) {
         Assert-Smoke ($bundleTree.ContainsKey($dll))
         Assert-Smoke ($bundleTree[$dll] -eq (Get-SmokeHash (Join-Path (Join-Path $reference 'bin') $dll)))
@@ -240,15 +284,16 @@ try {
 
     $stage = 'install-new'; $attemptedInstall = $true
     Invoke-SmokeProcess $Installer (Get-SmokeArguments $installRoot)
-    Confirm-SmokeRegistration $newVersion $config.version
+    Confirm-SmokeRegistration $newVersion $displayVersion
     $actual = Get-SmokeTree $installRoot
     $comparison = Compare-SmokePayload $expected $actual
     # Nao apagar sobras para fazer o teste passar: flags extras revelam upgrade incompleto.
     Add-SmokeStep 'installed-payload' $comparison.ok $comparison
-    Assert-Smoke $comparison.ok
+    Add-SmokeStep 'payload-evidence' $comparison.ok (Get-SmokePayloadEvidence $expected $actual $old)
+    Assert-Smoke $comparison.ok "Payload divergiu do proprio instalador novo: $($comparison | ConvertTo-Json -Compress)"
     Assert-Smoke ($actual.ContainsKey('uninstall.exe'))
     $changed = @($expected.Keys | Where-Object { $old.ContainsKey($_) -and $old[$_] -ne $actual[$_] })
-    Add-SmokeStep $stage $true @{ version = $config.version; expectedFiles = $expected.Count; filesMatchBuildAndRuntime = $true; previousFiles = $old.Count; replacedFiles = $changed; orphanFiles = @() }
+    Add-SmokeStep $stage $true @{ version = $displayVersion; expectedFiles = $expected.Count; filesMatchNewInstaller = $true; previousFiles = $old.Count; replacedFiles = $changed; orphanFiles = @() }
     Add-SmokeStep 'installed-runtime' $true @{ dllsMatchPinnedArchive = $true; noticesMatchReference = $true; runtimeDirectory = 'encoder-runtime'; noticesLayout = 'flat' }
 
     $stage = 'installed-sidecar'
@@ -279,12 +324,11 @@ try {
     $stage = 'uninstall'; Remove-SmokeInstallation; $attemptedInstall = $false
     $result.ok = $true
 } catch {
-    # Nao gravar Exception.Message: pode incluir caminho pessoal/linha de comando.
-    Add-SmokeStep $stage $false @{ code = 'stage-failed'; errorType = $_.Exception.GetType().Name }
+    Add-SmokeStep $stage $false (Get-SmokeErrorDetail $_ 'stage-failed' @($workRoot, $repoRoot, $env:USERPROFILE, $Installer, $PreviousInstaller))
 } finally {
     if ($attemptedInstall -and $contract -and $installRoot) {
         if (Test-Path -LiteralPath (Join-Path $installRoot 'uninstall.exe')) {
-            try { Remove-SmokeInstallation } catch { Add-SmokeStep 'cleanup' $false @{ code = 'uninstall-failed'; errorType = $_.Exception.GetType().Name }; $result.ok = $false }
+            try { Remove-SmokeInstallation } catch { Add-SmokeStep 'cleanup' $false (Get-SmokeErrorDetail $_ 'uninstall-failed' @($workRoot, $repoRoot, $env:USERPROFILE, $Installer, $PreviousInstaller)); $result.ok = $false }
         } else {
             Add-SmokeStep 'cleanup' $false @{ code = 'owned-uninstaller-missing'; unsafeFallbackRefused = $true }; $result.ok = $false
         }

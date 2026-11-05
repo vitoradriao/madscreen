@@ -1,0 +1,72 @@
+name: Repetir instalacao Windows sem build
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Run do app.yml com artefato de instalador
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Baixar instalador do run e release anterior
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          if ($env:SOURCE_RUN_ID -notmatch '^[1-9][0-9]*$') { throw 'run_id invalido' }
+          $PSNativeCommandUseErrorActionPreference = $false
+          $runJson = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:SOURCE_RUN_ID"
+          if ($LASTEXITCODE -ne 0) { throw 'Run inacessivel' }
+          $sourceRun = ($runJson -join "`n") | ConvertFrom-Json
+          if ($sourceRun.path -ne '.github/workflows/app.yml') { throw 'Run deve pertencer a app.yml' }
+          $download = Join-Path $env:RUNNER_TEMP 'smoke-input'
+          gh run download $env:SOURCE_RUN_ID --repo $env:GITHUB_REPOSITORY --name madscreen-installer-smoke-input --dir $download
+          if ($LASTEXITCODE -ne 0) {
+            # Runs anteriores ao artefato dedicado podem ter publicado o bundle antigo.
+            gh run download $env:SOURCE_RUN_ID --repo $env:GITHUB_REPOSITORY --name madscreen-setup-windows-x64 --dir $download
+            if ($LASTEXITCODE -ne 0) { throw 'Run sem artefato de instalador; necessario um novo app.yml' }
+          }
+          $installers = @(Get-ChildItem -LiteralPath $download -Recurse -File -Filter '*_x64-setup.exe')
+          if ($installers.Count -ne 1) { throw 'Artefato deve conter exatamente um instalador x64' }
+          "SMOKE_INSTALLER=$($installers[0].FullName)" >> $env:GITHUB_ENV
+          $previousDir = Join-Path $env:RUNNER_TEMP 'smoke-previous'
+          $releaseJson = gh release view --repo vitoradriao/madscreen-releases --json 'tagName,assets' 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $release = ($releaseJson -join "`n") | ConvertFrom-Json
+            $asset = @($release.assets | Where-Object { $_.name -match '_x64-setup\.exe$' } | Sort-Object name | Select-Object -First 1)
+            if ($asset.Count -eq 0) { $asset = @($release.assets | Where-Object { $_.name -eq 'madscreen-setup.exe' }) }
+            if ($asset.Count -eq 1) {
+              gh release download $release.tagName --repo vitoradriao/madscreen-releases --pattern $asset[0].name --dir $previousDir
+              if ($LASTEXITCODE -eq 0) { "SMOKE_PREVIOUS=$(Join-Path $previousDir $asset[0].name)" >> $env:GITHUB_ENV }
+            }
+          }
+          @{ runId = $env:SOURCE_RUN_ID; headSha = $sourceRun.head_sha } | ConvertTo-Json | Set-Content (Join-Path $env:RUNNER_TEMP 'smoke-source.json')
+      - name: Instalar, comparar, exercitar e desinstalar
+        run: |
+          $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', 'tools/release/installer-smoke.ps1',
+            '-Installer', $env:SMOKE_INSTALLER, '-WorkDir', (Join-Path $env:RUNNER_TEMP 'installer-smoke'))
+          if ($env:SMOKE_PREVIOUS) { $arguments += @('-PreviousInstaller', $env:SMOKE_PREVIOUS) }
+          else { Write-Host 'sem upgrade: nenhum instalador anterior acessivel' }
+          & powershell.exe @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Guardar resultado e origem do instalador
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-smoke-clean-windows
+          path: |
+            ${{ runner.temp }}/installer-smoke/result.json
+            ${{ runner.temp }}/smoke-source.json
+          if-no-files-found: warn

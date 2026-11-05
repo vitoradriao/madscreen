@@ -18,7 +18,7 @@ function pure(expression) {
     $tokens=$null; $errors=$null
     $ast=[System.Management.Automation.Language.Parser]::ParseFile(${quote(script)},[ref]$tokens,[ref]$errors)
     if($errors.Count){throw 'PowerShell parse error'}
-    $names=@('Test-SmokePermission','Get-SmokeArguments','Convert-SmokeVersion','Compare-SmokePayload','Get-SmokeContract','Get-SmokeSidecarDiagnostic','Assert-Smoke','Get-SmokeTree','Get-SmokeHash')
+    $names=@('Test-SmokePermission','Get-SmokeArguments','Convert-SmokeVersion','Compare-SmokePayload','Get-SmokeContract','Get-SmokeSidecarDiagnostic','Assert-Smoke','Get-SmokeTree','Get-SmokeHash','Get-SmokePayloadEvidence','Get-SmokeErrorDetail')
     foreach($fn in $ast.FindAll({param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst]},$true)) {
       if($names -contains $fn.Name){. ([scriptblock]::Create($fn.Extent.Text))}
     }
@@ -58,6 +58,21 @@ test('actual checked-in NSIS/currentUser/resource contract is recognized', {skip
   const result=pure(`Get-SmokeContract (Get-Content ${quote(join(app,'tauri.conf.json'))} -Raw | ConvertFrom-Json) (Get-Content ${quote(join(app,'tauri.windows.conf.json'))} -Raw | ConvertFrom-Json) (Get-Content ${quote(join(app,'windows/installer.nsi'))} -Raw) (Get-Content ${quote(join(app,'windows/hooks.nsh'))} -Raw)`);
   assert.equal(result.mode,'currentUser');
   assert.equal(result.uninstallKey,String.raw`Software\Microsoft\Windows\CurrentVersion\Uninstall\madscreen`);
+});
+test('payload evidence distinguishes retained old bytes from a separate same-version build', {skip:!available},()=>{
+  // Envelope preserva o array de um elemento atraves do pipeline PS5 ConvertTo-Json.
+  const result=pure(`@{ evidence = (Get-SmokePayloadEvidence @{'app.exe'='packaged'} @{'app.exe'='previous'} @{'app.exe'='previous'}) }`);
+  assert.equal(result.evidence[0].retainedPrevious,true);
+  assert.equal(result.evidence[0].packagedSha256,'packaged');
+  const replaced=pure(`@{ evidence = (Get-SmokePayloadEvidence @{'app.exe'='packaged'} @{'app.exe'='packaged'} @{'app.exe'='previous'}) }`);
+  assert.equal(replaced.evidence[0].retainedPrevious,false);
+});
+test('exception detail preserves the real reason and redacts known, drive and UNC paths', {skip:!available},()=>{
+  const result=pure(String.raw`try { throw 'exit code 17: C:\Users\owner\private.exe; \\server\personal\secret.txt' } catch { Get-SmokeErrorDetail $_ 'uninstall-failed' @('C:\Users\owner') }`);
+  assert.match(result.message,/exit code 17/);
+  assert.equal(result.errorType,'RuntimeException');
+  assert.ok(result.scriptLine>0);
+  assert.doesNotMatch(JSON.stringify(result),/owner|server|secret|private/);
 });
 test('sidecar failures preserve useful codes without copying personal paths into JSON', {skip:!available},()=>{
   const result=pure(`Get-SmokeSidecarDiagnostic 'D3D11 0x887A0004 C:/Users/private/file.exe'`);
@@ -106,4 +121,24 @@ test('workflow gate is after NSIS, before publication, with always-uploaded JSON
   assert.match(step,/gh release download/); assert.match(step,/GH_TOKEN: \$\{\{ github.token \}\}/);
   assert.match(step,/powershell\.exe/); assert.doesNotMatch(step,/-IUnderstandThisInstalls/);
   assert.match(step,/always\(\)/); assert.match(step,/actions\/upload-artifact@v4/); assert.match(step,/result\.json/);
+});
+test('retry workflow consumes an installer artifact without build or installation bypass',async()=>{
+  const workflow=await readFile('.github/workflows/installer-smoke.yml','utf8');
+  assert.match(workflow,/workflow_dispatch:/); assert.match(workflow,/run_id:/);
+  assert.match(workflow,/gh run download/); assert.match(workflow,/actions: read/);
+  assert.match(workflow,/madscreen-installer-smoke-input/); assert.match(workflow,/always\(\)/);
+  assert.doesNotMatch(workflow,/cargo |npm |npx |-IUnderstandThisInstalls/);
+  const app=await readFile('.github/workflows/app.yml','utf8');
+  assert.ok(app.indexOf('name: madscreen-installer-smoke-input')<app.indexOf('- name: Instalacao, upgrade'));
+});
+test('reference comes from clean installer payload and uninstall respects NSIS preserved preferences',async()=>{
+  const text=await readFile(script,'utf8');
+  assert.match(text,/source = 'new-installer-clean-install'/);
+  assert.match(text,/filesMatchNewInstaller = \$true/);
+  assert.doesNotMatch(text,/filesMatchBuildAndRuntime|\$expected\[\$contract.main\] = Get-SmokeHash/);
+  const removal=text.slice(text.indexOf('function Remove-SmokeInstallation'),text.indexOf('\ntry {\n    Assert-Smoke'));
+  assert.match(removal,/installLocationPreferencePreserved/);
+  assert.doesNotMatch(removal,/foreach \(\$key in @\([^\n]*locationKey/);
+  const template=await readFile('apps/madscreen-app/src-tauri/windows/installer.nsi','utf8');
+  assert.match(template,/\$DeleteAppDataCheckboxState = 1[\s\S]*DeleteRegKey SHCTX "\$\{MANUPRODUCTKEY\}"/);
 });

@@ -130,6 +130,13 @@ jobs:
             bundle = @{ createUpdaterArtifacts = [bool]$env:TAURI_SIGNING_PRIVATE_KEY }
           } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $bundleConfigPath -Encoding utf8
           npx tauri build --bundles nsis --config $bundleConfigPath
+      - name: Guardar instalador para repetir smoke sem recompilar
+        uses: actions/upload-artifact@v4
+        with:
+          name: madscreen-installer-smoke-input
+          path: apps/madscreen-app/src-tauri/target/release/bundle/nsis/*_x64-setup.exe
+          retention-days: 14
+          if-no-files-found: error
       - name: Instalacao, upgrade e desinstalacao em maquina limpa
         env:
           GH_TOKEN: ${{ github.token }}
