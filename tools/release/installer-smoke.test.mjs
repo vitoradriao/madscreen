@@ -113,7 +113,7 @@ test('full script refuses outside CI before inspecting installer or launching an
   }
 });
 test('workflow gate is after NSIS, before publication, with always-uploaded JSON and no bypass',async()=>{
-  const workflow=await readFile('.github/workflows/app.yml','utf8');
+  const workflow=(await readFile('.github/workflows/app.yml','utf8')).replace(/\r\n/g,'\n');
   const begin=workflow.indexOf('- name: Instalacao, upgrade e desinstalacao em maquina limpa');
   const end=workflow.indexOf('- name: Manifesto e verificacao criptografica',begin);
   assert.ok(begin>workflow.indexOf('- name: Instalador NSIS')&&end>begin);
@@ -123,22 +123,22 @@ test('workflow gate is after NSIS, before publication, with always-uploaded JSON
   assert.match(step,/always\(\)/); assert.match(step,/actions\/upload-artifact@v4/); assert.match(step,/result\.json/);
 });
 test('retry workflow consumes an installer artifact without build or installation bypass',async()=>{
-  const workflow=await readFile('.github/workflows/installer-smoke.yml','utf8');
+  const workflow=(await readFile('.github/workflows/installer-smoke.yml','utf8')).replace(/\r\n/g,'\n');
   assert.match(workflow,/workflow_dispatch:/); assert.match(workflow,/run_id:/);
   assert.match(workflow,/gh run download/); assert.match(workflow,/actions: read/);
   assert.match(workflow,/madscreen-installer-smoke-input/); assert.match(workflow,/always\(\)/);
   assert.doesNotMatch(workflow,/cargo |npm |npx |-IUnderstandThisInstalls/);
-  const app=await readFile('.github/workflows/app.yml','utf8');
+  const app=(await readFile('.github/workflows/app.yml','utf8')).replace(/\r\n/g,'\n');
   assert.ok(app.indexOf('name: madscreen-installer-smoke-input')<app.indexOf('- name: Instalacao, upgrade'));
 });
 test('reference comes from clean installer payload and uninstall respects NSIS preserved preferences',async()=>{
-  const text=await readFile(script,'utf8');
+  const text=(await readFile(script,'utf8')).replace(/\r\n/g,'\n');
   assert.match(text,/source = 'new-installer-clean-install'/);
   assert.match(text,/filesMatchNewInstaller = \$true/);
   assert.doesNotMatch(text,/filesMatchBuildAndRuntime|\$expected\[\$contract.main\] = Get-SmokeHash/);
   const removal=text.slice(text.indexOf('function Remove-SmokeInstallation'),text.indexOf('\ntry {\n    Assert-Smoke'));
   assert.match(removal,/installLocationPreferencePreserved/);
   assert.doesNotMatch(removal,/foreach \(\$key in @\([^\n]*locationKey/);
-  const template=await readFile('apps/madscreen-app/src-tauri/windows/installer.nsi','utf8');
+  const template=(await readFile('apps/madscreen-app/src-tauri/windows/installer.nsi','utf8')).replace(/\r\n/g,'\n');
   assert.match(template,/\$DeleteAppDataCheckboxState = 1[\s\S]*DeleteRegKey SHCTX "\$\{MANUPRODUCTKEY\}"/);
 });
