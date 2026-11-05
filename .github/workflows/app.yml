@@ -130,6 +130,40 @@ jobs:
             bundle = @{ createUpdaterArtifacts = [bool]$env:TAURI_SIGNING_PRIVATE_KEY }
           } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $bundleConfigPath -Encoding utf8
           npx tauri build --bundles nsis --config $bundleConfigPath
+      - name: Instalacao, upgrade e desinstalacao em maquina limpa
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $previousDir = Join-Path $env:RUNNER_TEMP 'installer-smoke-previous'
+          New-Item -ItemType Directory -Path $previousDir -Force | Out-Null
+          $previous = $null
+          # Ausencia/acesso negado ao release anterior nao inventa aceite de upgrade.
+          $releaseJson = gh release view --repo vitoradriao/madscreen-releases --json 'tagName,assets' 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $previousRelease = ($releaseJson -join "`n") | ConvertFrom-Json
+            $asset = @($previousRelease.assets | Where-Object { $_.name -match '_x64-setup\.exe$' } | Sort-Object name | Select-Object -First 1)
+            if ($asset.Count -eq 0) { $asset = @($previousRelease.assets | Where-Object { $_.name -eq 'madscreen-setup.exe' }) }
+            if ($asset.Count -eq 1) {
+              gh release download $previousRelease.tagName --repo vitoradriao/madscreen-releases --pattern $asset[0].name --dir $previousDir
+              if ($LASTEXITCODE -eq 0) { $previous = Join-Path $previousDir $asset[0].name }
+            }
+          }
+          if (-not $previous) { Write-Host 'sem upgrade: nenhum instalador anterior acessivel' }
+          $version = (Get-Content apps/madscreen-app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $smokeArguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', 'tools/release/installer-smoke.ps1',
+            '-Installer', "apps/madscreen-app/src-tauri/target/release/bundle/nsis/madscreen_${version}_x64-setup.exe",
+            '-WorkDir', (Join-Path $env:RUNNER_TEMP 'installer-smoke'))
+          if ($previous) { $smokeArguments += @('-PreviousInstaller', $previous) }
+          & powershell.exe @smokeArguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Guardar resultado da instalacao limpa
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-smoke-clean-windows
+          path: ${{ runner.temp }}/installer-smoke/result.json
+          if-no-files-found: warn
       - name: Manifesto e verificacao criptografica
         if: ${{ env.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
