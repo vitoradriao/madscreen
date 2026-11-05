@@ -34,9 +34,7 @@ fn take_renderer_recovery(
     if window.label() != "main" || !recovery.take() {
         return false;
     }
-    if let Some(child) = app.get_webview_window("miniplayer") {
-        let _ = child.destroy();
-    }
+    miniplayer::destroy_all(&app);
     true
 }
 
@@ -315,7 +313,7 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if window.label() == "miniplayer" {
+            if miniplayer::is_miniplayer(window.label()) {
                 return;
             }
             // Fechar envia para a bandeja; minimizar mantém a janela na barra de tarefas.

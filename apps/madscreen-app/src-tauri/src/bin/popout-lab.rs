@@ -56,9 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if payload.event() == tauri::webview::PageLoadEvent::Finished
                     && window.state::<renderer_recovery::RendererRecovery>().take()
                 {
-                    if let Some(child) = window.app_handle().get_webview_window("miniplayer") {
-                        let _ = child.destroy();
-                    }
+                    miniplayer::destroy_all(window.app_handle());
                     let _ = std::fs::write(
                         recovery_directory.join("renderer-recovered.json"),
                         "{\"nativeReloadConfirmed\":true}",
@@ -70,13 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return miniplayer::new_window(&child_app, url, features);
                 }
                 if url.as_str() != "about:blank"
-                    || child_app
-                        .get_webview_window(if product_mode {
-                            "miniplayer"
-                        } else {
-                            "popout-child"
-                        })
-                        .is_some()
+                    || child_app.get_webview_window("popout-child").is_some()
                 {
                     return NewWindowResponse::Deny;
                 }
@@ -150,14 +142,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .and_then(|()| window.show())
                                 .and_then(|()| window.set_focus())
                                 .map_err(|e| e.to_string()),
-                            ("close-popup", _) => target
-                                .get_webview_window(if product_mode {
-                                    "miniplayer"
-                                } else {
-                                    "popout-child"
-                                })
-                                .map_or(Ok(()), |window| window.destroy())
-                                .map_err(|e| e.to_string()),
+                            ("close-popup", _) => (if product_mode {
+                                miniplayer::any_window(&target)
+                            } else {
+                                target.get_webview_window("popout-child")
+                            })
+                            .map_or(Ok(()), |window| window.destroy())
+                            .map_err(|e| e.to_string()),
                             _ => Err("ação de laboratório inválida".into()),
                         };
                         if let Ok(bytes) = serde_json::to_vec(

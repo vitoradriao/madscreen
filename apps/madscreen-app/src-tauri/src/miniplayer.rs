@@ -1,14 +1,21 @@
-//! Janela relacionada ao opener; a sessão de mídia continua no frontend principal.
+//! Janelas relacionadas ao opener; a sessão de mídia continua no frontend principal.
+//! Uma por transmissão assistida (até [`MAX_WINDOWS`]), cada uma com seu token e posição.
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{
     AppHandle, Emitter, Manager, WindowEvent,
     webview::{NewWindowFeatures, NewWindowResponse},
 };
 
+/// O layout de Assistir mostra no máximo duas lives; cada uma pode ir para o mini-player.
+pub const MAX_WINDOWS: usize = 2;
+const LABEL_PREFIX: &str = "miniplayer-";
+
 #[derive(Default)]
 pub struct MiniPlayer {
-    pending: Mutex<Option<String>>,
-    geometry: Mutex<Option<Geometry>>,
+    /// Token → vaga (índice da posição lembrada). Reservado no prepare, liberado no fechamento.
+    tokens: Mutex<HashMap<String, usize>>,
+    geometry: Mutex<[Option<Geometry>; MAX_WINDOWS]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -19,10 +26,54 @@ struct Geometry {
     height: f64,
 }
 
-fn fit_geometry(saved: Option<Geometry>, areas: &[Geometry]) -> Geometry {
+fn label(token: &str) -> String {
+    format!("{LABEL_PREFIX}{token}")
+}
+
+pub fn is_miniplayer(label: &str) -> bool {
+    label.starts_with(LABEL_PREFIX)
+}
+
+/// Qualquer mini-player aberto (o laboratório fecha um por vez).
+#[allow(dead_code)] // só o binário popout-lab usa; o app fecha por token.
+pub fn any_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    app.webview_windows()
+        .into_iter()
+        .find(|(label, _)| is_miniplayer(label))
+        .map(|(_, window)| window)
+}
+
+/// Recuperação do renderer: nenhum mini-player sobrevive órfão do palco que sumiu.
+pub fn destroy_all(app: &AppHandle) {
+    for (label, window) in app.webview_windows() {
+        if is_miniplayer(&label) {
+            let _ = window.destroy();
+        }
+    }
+    if let Ok(mut tokens) = app.state::<MiniPlayer>().tokens.lock() {
+        tokens.clear();
+    }
+}
+
+fn release(app: &AppHandle, token: &str) {
+    if let Ok(mut tokens) = app.state::<MiniPlayer>().tokens.lock() {
+        tokens.remove(token);
+    }
+}
+
+fn slot_of(app: &AppHandle, token: &str) -> Option<usize> {
+    app.state::<MiniPlayer>()
+        .tokens
+        .lock()
+        .ok()
+        .and_then(|tokens| tokens.get(token).copied())
+}
+
+fn fit_geometry(saved: Option<Geometry>, areas: &[Geometry], slot: usize) -> Geometry {
+    // Sem posição lembrada, a segunda janela nasce abaixo da primeira em vez de cobri-la.
     let default = Geometry {
         x: 0.,
-        y: 0.,
+        y: 380. * slot as f64,
         width: 640.,
         height: 360.,
     };
@@ -57,8 +108,11 @@ fn fit_geometry(saved: Option<Geometry>, areas: &[Geometry]) -> Geometry {
     }
 }
 
-fn remember(app: &AppHandle, window: &tauri::WebviewWindow) {
-    if window.is_fullscreen().unwrap_or(true) || window.is_minimized().unwrap_or(true) {
+fn remember(app: &AppHandle, window: &tauri::WebviewWindow, slot: usize) {
+    if slot >= MAX_WINDOWS
+        || window.is_fullscreen().unwrap_or(true)
+        || window.is_minimized().unwrap_or(true)
+    {
         return;
     }
     if let (Ok(position), Ok(size), Ok(scale)) = (
@@ -67,7 +121,7 @@ fn remember(app: &AppHandle, window: &tauri::WebviewWindow) {
         window.scale_factor(),
     ) && let Ok(mut saved) = app.state::<MiniPlayer>().geometry.lock()
     {
-        *saved = Some(Geometry {
+        saved[slot] = Some(Geometry {
             x: f64::from(position.x) / scale,
             y: f64::from(position.y) / scale,
             width: f64::from(size.width) / scale,
@@ -81,13 +135,18 @@ pub fn prepare_miniplayer(app: AppHandle, token: String) -> Result<(), String> {
     if token.len() != 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("Identificador de janela inválido.".into());
     }
-    if app.get_webview_window("miniplayer").is_some() {
-        return Err("Já existe um mini-player aberto.".into());
-    }
-    *app.state::<MiniPlayer>()
-        .pending
+    let state = app.state::<MiniPlayer>();
+    let mut tokens = state
+        .tokens
         .lock()
-        .map_err(|_| "Controle da janela indisponível")? = Some(token);
+        .map_err(|_| "Controle da janela indisponível")?;
+    if tokens.contains_key(&token) {
+        return Ok(());
+    }
+    let slot = (0..MAX_WINDOWS)
+        .find(|slot| !tokens.values().any(|used| used == slot))
+        .ok_or("Já existem dois mini-players abertos.")?;
+    tokens.insert(token, slot);
     Ok(())
 }
 
@@ -98,20 +157,20 @@ pub fn control_miniplayer(
     value: Option<bool>,
     token: String,
 ) -> Result<(), String> {
-    let current = app.state::<MiniPlayer>();
-    let expected = current
-        .pending
-        .lock()
-        .map_err(|_| "Controle da janela indisponível")?;
-    if expected.as_deref() != Some(token.as_str()) {
-        return Err("Operação de janela antiga.".into());
-    }
-    drop(expected);
+    let Some(slot) = slot_of(&app, &token) else {
+        return if matches!(action.as_str(), "close" | "return") {
+            Ok(())
+        } else {
+            Err("Operação de janela antiga.".into())
+        };
+    };
+    let window = app.get_webview_window(&label(&token));
     if action == "return" {
-        if let Some(window) = app.get_webview_window("miniplayer") {
-            remember(&app, &window);
+        if let Some(window) = window {
+            remember(&app, &window, slot);
             window.destroy().map_err(|error| error.to_string())?;
         }
+        release(&app, &token);
         if let Some(window) = app.get_webview_window("main") {
             window
                 .unminimize()
@@ -121,8 +180,9 @@ pub fn control_miniplayer(
         }
         return Ok(());
     }
-    let Some(window) = app.get_webview_window("miniplayer") else {
+    let Some(window) = window else {
         return if action == "close" {
+            release(&app, &token);
             Ok(())
         } else {
             Err("Mini-player encerrado.".into())
@@ -130,7 +190,8 @@ pub fn control_miniplayer(
     };
     match action.as_str() {
         "close" => {
-            remember(&app, &window);
+            remember(&app, &window, slot);
+            release(&app, &token);
             window.destroy()
         }
         "show" => window.show().and_then(|()| window.set_focus()),
@@ -155,25 +216,19 @@ pub fn new_window(
     url: tauri::Url,
     features: NewWindowFeatures,
 ) -> NewWindowResponse<tauri::Wry> {
-    if url.scheme() != "about"
-        || url.path() != "blank"
-        || app.get_webview_window("miniplayer").is_some()
-    {
+    if url.scheme() != "about" || url.path() != "blank" {
         return NewWindowResponse::Deny;
     }
-    let token = {
-        let state = app.state::<MiniPlayer>();
-        let Ok(pending) = state.pending.lock() else {
-            return NewWindowResponse::Deny;
-        };
-        if pending.as_deref() != url.fragment() {
-            return NewWindowResponse::Deny;
-        }
-        pending.clone()
-    };
-    let Some(token) = token else {
+    let Some(token) = url.fragment().map(str::to_owned) else {
         return NewWindowResponse::Deny;
     };
+    // Só abre token reservado por prepare_miniplayer e ainda sem janela.
+    let Some(slot) = slot_of(app, &token) else {
+        return NewWindowResponse::Deny;
+    };
+    if app.get_webview_window(&label(&token)).is_some() {
+        return NewWindowResponse::Deny;
+    }
     let owner = app.clone();
     let event_token = token.clone();
     let mut monitors = app.available_monitors().unwrap_or_default();
@@ -205,10 +260,10 @@ pub fn new_window(
         .geometry
         .lock()
         .ok()
-        .and_then(|g| *g);
-    let geometry = fit_geometry(saved, &areas);
+        .and_then(|g| g[slot]);
+    let geometry = fit_geometry(saved, &areas, slot);
     let builder =
-        tauri::WebviewWindowBuilder::new(app, "miniplayer", tauri::WebviewUrl::External(url))
+        tauri::WebviewWindowBuilder::new(app, label(&token), tauri::WebviewUrl::External(url))
             .window_features(features)
             .title("MadScreen — mini-player")
             .inner_size(geometry.width, geometry.height)
@@ -223,7 +278,7 @@ pub fn new_window(
             let event_window = window.clone();
             window.on_window_event(move |event| match event {
                 WindowEvent::CloseRequested { api, .. } => {
-                    remember(&owner, &event_window);
+                    remember(&owner, &event_window, slot);
                     api.prevent_close();
                     let _ = owner.emit_to("main", "miniplayer-close-requested", &event_token);
                     // Se o frontend não responder, destruir não deixa janela órfã.
@@ -234,14 +289,18 @@ pub fn new_window(
                     });
                 }
                 WindowEvent::Destroyed => {
+                    release(&owner, &event_token);
                     let _ = owner.emit_to("main", "miniplayer-closed", &event_token);
                 }
-                WindowEvent::Moved(_) | WindowEvent::Resized(_) => remember(&owner, &event_window),
+                WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
+                    remember(&owner, &event_window, slot)
+                }
                 _ => {}
             });
             NewWindowResponse::Create { window }
         }
         Err(error) => {
+            release(app, &token);
             tracing::warn!(%error, "falha ao criar mini-player");
             NewWindowResponse::Deny
         }
@@ -267,6 +326,7 @@ mod tests {
                 height: 2000.,
             }),
             &[area],
+            0,
         );
         assert_eq!(fitted, area);
         let fitted = fit_geometry(
@@ -277,6 +337,7 @@ mod tests {
                 height: 100.,
             }),
             &[area],
+            0,
         );
         assert_eq!(
             fitted,
@@ -299,17 +360,33 @@ mod tests {
             width: 480.,
             height: 300.,
         };
-        assert_eq!(fit_geometry(Some(saved), &[area, second]), saved);
+        assert_eq!(fit_geometry(Some(saved), &[area, second], 0), saved);
         assert_eq!(
             fit_geometry(
                 Some(Geometry {
                     x: f64::NAN,
                     ..saved
                 }),
-                &[area]
+                &[area],
+                0
             )
             .width,
             640.
         );
+    }
+
+    #[test]
+    fn second_slot_does_not_open_on_top_of_the_first() {
+        let area = Geometry {
+            x: 0.,
+            y: 0.,
+            width: 1280.,
+            height: 720.,
+        };
+        let first = fit_geometry(None, &[area], 0);
+        let second = fit_geometry(None, &[area], 1);
+        assert_eq!(first.y, 0.);
+        assert_eq!(second.y, 360.);
+        assert!(second.y >= first.y + first.height);
     }
 }

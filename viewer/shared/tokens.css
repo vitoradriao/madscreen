@@ -291,13 +291,20 @@ summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; bo
 .list-row:hover .row-remove, .row-remove:focus-visible { opacity: 1; }
 .list-row .btn { flex: none; }
 .watch-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); }
-.watch-grid.split { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.watch-grid.split.featured-first { grid-template-columns: minmax(0, 7fr) minmax(0, 3fr); }
-.watch-grid.split.featured-second { grid-template-columns: minmax(0, 3fr) minmax(0, 7fr); }
+/* --split-a/--split-b vêm do layout (destaque 70/30 ou o tamanho arrastado no divisor). */
+.watch-grid.split { gap: 0; grid-template-columns: minmax(0, var(--split-a, 1fr)) var(--sp-4) minmax(0, var(--split-b, 1fr)); }
 .watch-slot { min-width: 0; border: 1px solid transparent; border-radius: var(--r-lg); padding: calc(var(--sp-3) / 2); }
 .watch-grid.split .watch-slot.selected { border-color: var(--border-strong); }
-.watch-compact .watch-grid.split { grid-template-columns: minmax(0, 1fr); }
-@media (max-width: 900px) { .watch-grid.split, .watch-grid.split.featured-first, .watch-grid.split.featured-second { grid-template-columns: minmax(0, 1fr); } }
+.watch-divider:not([hidden]) { position: relative; display: block; cursor: col-resize; touch-action: none; border-radius: var(--r-sm); outline: none; }
+.watch-divider::after { content: ""; position: absolute; top: 50%; left: 50%; width: 4px; height: 48px; max-height: 40%; transform: translate(-50%, -50%); border-radius: 2px; background: var(--border-strong); opacity: .5; transition: opacity .15s, background .15s; }
+.watch-divider:hover::after, .watch-divider:focus-visible::after, .watch-divider.dragging::after { opacity: 1; background: var(--accent); }
+.watch-compact .watch-grid.split { gap: var(--sp-4); grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
+.watch-compact .watch-divider { display: none !important; }
+@media (max-width: 900px) {
+  .watch-grid.split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, var(--split-a, 1fr)) var(--sp-4) minmax(0, var(--split-b, 1fr)); }
+  .watch-divider:not([hidden]) { cursor: row-resize; }
+  .watch-divider::after { width: 48px; height: 4px; max-width: 40%; max-height: none; }
+}
 label:has(input[type="checkbox"]) { min-height: 30px; cursor: pointer; }
 input[type="checkbox"] { accent-color: var(--accent); }
 

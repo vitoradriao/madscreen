@@ -5,7 +5,11 @@ import { checkRendererRecovery } from "./renderer-recovery";
 void checkRendererRecovery();
 
 export interface DetachedPlayer { close(): void }
-let active: DetachedPlayer | null = null;
+/** Uma janela por transmissão do layout (até duas lives ao mesmo tempo). */
+export const MAX_MINI_PLAYERS = 2;
+const active = new Set<object>();
+/** O mesmo palco nunca vai para duas janelas. */
+const detachedStages = new WeakSet<HTMLElement>();
 export interface MiniPlayerHost {
   invoke<T>(command: string, args: Record<string, unknown>): Promise<T>;
   listen(event: string, handler: (event: { payload: string }) => void): Promise<UnlistenFn>;
@@ -18,19 +22,28 @@ export async function openMiniPlayer(stage: HTMLElement, title: string): Promise
 
 /** Host explícito permite ensaiar o mesmo controle nativo em laboratório isolado. */
 export async function openMiniPlayerWithHost(stage: HTMLElement, title: string, host: MiniPlayerHost): Promise<DetachedPlayer> {
-  if (active) throw Error("Feche o mini-player atual antes de abrir outro.");
+  if (detachedStages.has(stage)) throw Error("Esta transmissão já está no mini-player.");
+  if (active.size >= MAX_MINI_PLAYERS) throw Error("Já existem dois mini-players abertos.");
   let allowed = true;
   const reservation = { close: () => { allowed = false; } };
-  active = reservation;
+  active.add(reservation);
+  detachedStages.add(stage);
   const token = crypto.randomUUID().replaceAll("-", "");
   const home = stage.ownerDocument;
   try {
     if (home.fullscreenElement) await home.exitFullscreen();
     await host.invoke("prepare_miniplayer", { token }); }
-  catch (error) { active = null; throw error; }
-  if (!allowed || !stage.isConnected) { active = null; throw Error("A reprodução foi encerrada."); }
+  catch (error) { active.delete(reservation); detachedStages.delete(stage); throw error; }
+  if (!allowed || !stage.isConnected) {
+    active.delete(reservation); detachedStages.delete(stage);
+    void host.invoke("control_miniplayer", { action: "close", value: null, token }).catch(() => {});
+    throw Error("A reprodução foi encerrada.");
+  }
   const popup = window.open(`about:blank#${token}`, `madscreen-mini-${token}`, "width=640,height=360");
-  if (!popup) { active = null; throw Error("Não foi possível abrir o mini-player."); }
+  if (!popup) {
+    active.delete(reservation); detachedStages.delete(stage);
+    void host.invoke("control_miniplayer", { action: "close", value: null, token }).catch(() => {});
+    throw Error("Não foi possível abrir o mini-player."); }
   const placeholder = home.createElement("div");
   placeholder.className = "placeholder";
   placeholder.textContent = "Esta transmissão está no mini-player.";
@@ -53,7 +66,7 @@ export async function openMiniPlayerWithHost(stage: HTMLElement, title: string, 
     stage.classList.remove("mini-hidden");
     if (savedStyle === null) stage.removeAttribute("style"); else stage.setAttribute("style", savedStyle);
     for (const video of playingVideos) void video.play().catch(() => {});
-    active = null;
+    active.delete(handle); detachedStages.delete(stage);
     void control(activate ? "return" : "close").catch(() => {});
   };
   const recovery = setInterval(() => {
@@ -63,7 +76,8 @@ export async function openMiniPlayerWithHost(stage: HTMLElement, title: string, 
     } catch { restore(); }
   }, 500);
   const handle = { close: () => restore() };
-  active = handle;
+  active.delete(reservation);
+  active.add(handle);
   back.addEventListener("click", () => restore(true));
   try {
     for (const event of ["miniplayer-close-requested", "miniplayer-closed"]) {
