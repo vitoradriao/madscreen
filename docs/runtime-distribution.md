@@ -62,6 +62,17 @@ com o código-fonte correspondente publicado em cada release. O risco de patente
 mantenedor. O objetivo é distribuir um runtime **mínimo e reproduzível** (só FFmpeg + x264 + AMF/oneVPL), em vez do pacote
 *full* de terceiros usado até aqui, cujas DLLs embutem dezenas de bibliotecas que o madscreen não usa.
 
+## Voltar a um runtime anterior
+
+O pacote do runtime é fixado por `tools/encode/runtime-gpl.json` (URL do release, SHA-256 do ZIP e tamanho). Cada release do runtime (`runtime-AAAA-MM-DD`) permanece publicado com suas fontes e `SHA256SUMS.txt`: **não apague releases antigos**.
+
+Para voltar a um runtime anterior:
+
+1. Altere `tools/encode/runtime-gpl.json` para apontar ao release anterior (URL, SHA-256 e tamanho do ZIP dele) e faça o commit.
+2. O CI (`app.yml`) baixa o pacote, confere o SHA-256 e o auditor (`tools/release/runtime-audit.mjs`) volta a inventariar os binários. Sem mudar o código do app, o instalador novo passa a empacotar o runtime anterior.
+3. Publique o resultado como uma **versão nova do app** (número maior). O atualizador só oferece instaladores de versão maior que a instalada, então o retorno chega aos usuários como uma atualização com o runtime antigo, e não como um downgrade.
+4. Quem instalou manualmente pode usar o instalador de uma versão anterior publicada no repositório de releases. O teste `tools/release/installer-smoke.ps1` (executado no CI) cobre instalar uma versão por cima da outra e desinstalar.
+
 ## Candidato OpenH264 (experimental)
 
 O repositório inclui um backend `--encoder openh264` (FFmpeg com `libopenh264`, LGPL) usado apenas em laboratório:
