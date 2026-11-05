@@ -102,7 +102,7 @@ impl Default for EncoderConfig {
         Self {
             codec: VideoCodec::H264,
             h264_level: None,
-            h264_profile: H264Profile::High,
+            h264_profile: H264Profile::ConstrainedBaseline,
             width: 1920,
             height: 1080,
             fps: FrameRate { num: 144, den: 1 },

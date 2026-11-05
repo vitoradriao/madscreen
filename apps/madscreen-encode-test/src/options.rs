@@ -257,7 +257,7 @@ pub struct Options {
         long,
         env = "MADSCREEN_H264_PROFILE",
         value_enum,
-        default_value = "high"
+        default_value = "constrained-baseline"
     )]
     pub h264_profile: H264ProfileArg,
     #[arg(long, value_enum, default_value = "p1")]
