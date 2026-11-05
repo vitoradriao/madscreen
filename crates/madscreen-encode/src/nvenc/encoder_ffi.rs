@@ -281,11 +281,12 @@ unsafe impl Send for NvencEncoder {}
 impl NvencEncoder {
     pub fn new(
         gpu: &GpuDevice,
-        config: EncoderConfig,
+        mut config: EncoderConfig,
         textures: &[ID3D11Texture2D],
         bgra: bool,
     ) -> Result<Self> {
         config.validate()?;
+        config.clamp_h264_bitrate();
         if !(2..=16).contains(&textures.len()) {
             return Err(EncodeError::InvalidConfig("anel exige 2–16 texturas"));
         }
@@ -729,6 +730,8 @@ impl Encoder for NvencEncoder {
         let mut config = self.config.clone();
         config.bitrate_bps = bitrate_bps;
         config.fps = fps;
+        config.validate()?;
+        config.clamp_h264_bitrate();
         // SAFETY: mesma sessão/tabela da inicialização; encode pendente foi rejeitado acima.
         let native = unsafe {
             reconfigure_driver_mode(

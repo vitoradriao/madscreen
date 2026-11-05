@@ -35,6 +35,20 @@ const H264_LEVELS: [(u32, u32, u32); 8] = [
     (52, 2_073_600, 36_864),
 ];
 
+/// MaxBR em bps para Baseline/Main nos niveis usados pelo planejador.
+/// High usa o fator 1,25 no encoder; nivel desconhecido nao recebe teto inventado.
+pub fn h264_max_bitrate_bps(level_idc: u32) -> Option<u32> {
+    let kbps = match level_idc {
+        31 => 14_000,
+        32 | 40 => 20_000,
+        41 | 42 => 50_000,
+        50 => 135_000,
+        51 | 52 => 240_000,
+        _ => return None,
+    };
+    Some(kbps * 1000)
+}
+
 /// Menor nível H.264 entre 3.1 e 5.2 que comporta dimensões e taxa de quadros.
 /// Dimensões nulas e FPS não positivo ou não finito não são suportados.
 pub fn h264_level(width: u32, height: u32, fps: f64) -> Option<u32> {
@@ -276,6 +290,24 @@ pub fn auto_bitrate_bps(width: u32, height: u32, fps: f64) -> u32 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_bitrate_matches_every_planned_level() {
+        for (level, mbps) in [
+            (31, 14),
+            (32, 20),
+            (40, 20),
+            (41, 50),
+            (42, 50),
+            (50, 135),
+            (51, 240),
+            (52, 240),
+        ] {
+            assert_eq!(h264_max_bitrate_bps(level), Some(mbps * 1_000_000));
+        }
+        assert_eq!(h264_max_bitrate_bps(0), None);
+        assert_eq!(h264_max_bitrate_bps(53), None);
+    }
 
     fn limits() -> EncoderLimits {
         EncoderLimits::default()

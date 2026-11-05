@@ -1511,6 +1511,7 @@ name = "madscreen-encode"
 version = "0.1.0"
 dependencies = [
  "madscreen-capture",
+ "madscreen-ipc",
  "madscreen-telemetry",
  "serde",
  "thiserror 2.0.21",

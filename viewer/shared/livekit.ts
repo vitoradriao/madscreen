@@ -9,6 +9,8 @@ export interface LiveKitWatchConnection {
   room: string;
   identity: string;
   publisherIdentity: string;
+  /** Opt-in do laboratorio AV20; ausencia preserva 40 ms. */
+  labAudioTargetMs?: number;
 }
 export interface LiveKitWatchHandlers {
   onTrack(track: MediaStreamTrack): void;
@@ -27,7 +29,13 @@ export class LiveKitViewer {
   private audioLatency: ReceiverLatency | null = null;
   private abortCleanup: (() => void) | null = null;
 
-  constructor(private readonly connection: LiveKitWatchConnection, private readonly audio: boolean, private readonly handlers: LiveKitWatchHandlers) {}
+  private readonly audioTargetMs: number;
+
+  constructor(private readonly connection: LiveKitWatchConnection, private readonly audio: boolean, private readonly handlers: LiveKitWatchHandlers) {
+    const target = connection.labAudioTargetMs ?? 40;
+    if (!Number.isInteger(target) || target < 0 || target > 200) throw new RangeError("Alvo de audio AV20 invalido");
+    this.audioTargetMs = target;
+  }
 
   get connected(): boolean { return !this.closed && this.room.state === ConnectionState.Connected; }
 
@@ -52,7 +60,8 @@ export class LiveKitViewer {
         publication.setSubscribed(false);
         return;
       }
-      const latency = requestReceiverLatency(track.receiver, track.kind === Track.Kind.Audio ? 40 : 0, track.kind === Track.Kind.Audio ? 40 : 0);
+      const targetMs = track.kind === Track.Kind.Audio ? this.audioTargetMs : 0;
+      const latency = requestReceiverLatency(track.receiver, targetMs, targetMs);
       if (track.kind === Track.Kind.Video) {
         this.video = track;
         this.videoLatency = latency;

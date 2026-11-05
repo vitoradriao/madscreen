@@ -35,8 +35,9 @@ fn main() {
 }
 #[cfg(windows)]
 fn main() -> anyhow::Result<()> {
-    use clap::Parser;
-    let mut options = options::Options::parse();
+    use clap::CommandFactory;
+    let matches = options::Options::command().get_matches();
+    let mut options = options::Options::from_cli_matches(&matches)?;
     options.height_choice = options.height;
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)

@@ -25,13 +25,84 @@ const MAX_BUFFER_MS: usize = 200;
 /// Atraso maximo tolerado pelo relogio antes de pular blocos (1 s).
 const MAX_CATCHUP_BLOCKS: u64 = 100;
 
+/// Opt-in de laboratorio. Ausencia preserva 200 ms e desliga a instrumentacao.
+pub fn parse_lab_ring_ms(value: Option<&str>) -> Result<Option<usize>, &'static str> {
+    match value {
+        None => Ok(None),
+        Some(value) if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|ms| (10..=200).contains(ms))
+            .map(Some)
+            .ok_or("AV20_RING_MS deve ser inteiro entre 10 e 200"),
+        Some(_) => Err("AV20_RING_MS deve ser inteiro entre 10 e 200"),
+    }
+}
+
+/// Duracao do PCM intercalado, nao tempo de residencia nem latencia de captura.
+pub fn samples_duration_ms(samples: u64) -> f64 {
+    samples as f64 * 1000.0 / (f64::from(SAMPLE_RATE) * CHANNELS as f64)
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct RingStats {
+    pub pops: u64,
+    pub occupancy_sum_samples: u64,
+    pub occupancy_max_samples: u64,
+    pub empty_pops: u64,
+    pub underrun_pops: u64,
+    pub age_observations: u64,
+    pub age_sum_us: u64,
+    pub age_max_us: u64,
+}
+
+struct Stamp {
+    samples: usize,
+    enqueued: Instant,
+}
+
+struct LabDiagnostics {
+    stamps: VecDeque<Stamp>,
+    stats: RingStats,
+    id: u64,
+}
+
+struct RingData {
+    samples: VecDeque<f32>,
+    lab: Option<LabDiagnostics>,
+}
+
+impl RingData {
+    fn discard(&mut self, count: usize) {
+        self.samples.drain(..count);
+        self.discard_stamps(count);
+    }
+
+    fn discard_stamps(&mut self, mut count: usize) {
+        if let Some(lab) = &mut self.lab {
+            while count > 0 {
+                let Some(front) = lab.stamps.front_mut() else {
+                    break;
+                };
+                let n = count.min(front.samples);
+                count -= n;
+                front.samples -= n;
+                if front.samples == 0 {
+                    lab.stamps.pop_front();
+                }
+            }
+        }
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Buffer circular limitado de amostras f32 intercaladas.
 pub struct Ring {
-    data: Mutex<VecDeque<f32>>,
+    data: Mutex<RingData>,
+    lab_enabled: bool,
     max_samples: usize,
     dropped: AtomicU64,
 }
@@ -42,9 +113,31 @@ impl Ring {
     }
 
     pub fn with_capacity_ms(ms: usize) -> Self {
+        Self::with_options(ms, false)
+    }
+
+    /// Chamar somente com capacidade validada por parse_lab_ring_ms.
+    pub fn with_lab_capacity_ms(ms: usize) -> Result<Self, &'static str> {
+        if !(10..=200).contains(&ms) {
+            return Err("AV20_RING_MS deve ser inteiro entre 10 e 200");
+        }
+        Ok(Self::with_options(ms, true))
+    }
+
+    fn with_options(ms: usize, diagnostics: bool) -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let max_samples = ms * SAMPLE_RATE as usize / 1000 * CHANNELS;
         Self {
-            data: Mutex::new(VecDeque::with_capacity(max_samples)),
+            lab_enabled: diagnostics,
+            data: Mutex::new(RingData {
+                samples: VecDeque::with_capacity(max_samples),
+                lab: diagnostics.then(|| LabDiagnostics {
+                    // No maximo um timestamp por amostra retida; nunca cresce no hot path.
+                    stamps: VecDeque::with_capacity(max_samples),
+                    stats: RingStats::default(),
+                    id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+                }),
+            }),
             max_samples,
             dropped: AtomicU64::new(0),
         }
@@ -52,39 +145,78 @@ impl Ring {
 
     /// Acrescenta amostras; se passar do limite descarta as mais antigas.
     pub fn push(&self, samples: &[f32]) {
+        self.push_values(samples.len(), samples.iter().copied(), None);
+    }
+
+    fn push_values(&self, count: usize, values: impl Iterator<Item = f32>, at: Option<Instant>) {
         let mut data = lock(&self.data);
-        data.extend(samples.iter().copied());
-        if data.len() > self.max_samples {
-            let excess = data.len() - self.max_samples;
-            data.drain(..excess);
-            self.dropped.fetch_add(excess as u64, Ordering::Relaxed);
+        let skip = count.saturating_sub(self.max_samples);
+        let retained = count.min(self.max_samples);
+        let excess = data
+            .samples
+            .len()
+            .saturating_add(retained)
+            .saturating_sub(self.max_samples);
+        data.discard(excess);
+        let dropped = (excess as u64).saturating_add(skip as u64);
+        if dropped > 0 {
+            self.dropped.fetch_add(dropped, Ordering::Relaxed);
+        }
+        // Descartar ANTES de inserir evita realocacao mesmo para pacotes maiores que o ring.
+        data.samples.extend(values.skip(skip).take(retained));
+        if retained > 0
+            && let Some(lab) = &mut data.lab
+        {
+            lab.stamps.push_back(Stamp {
+                samples: retained,
+                enqueued: at.unwrap_or_else(Instant::now),
+            });
         }
     }
 
     /// Acrescenta `count` amostras de silencio (pacote marcado como silencioso).
     pub fn push_silence(&self, count: usize) {
-        let mut data = lock(&self.data);
-        data.extend(std::iter::repeat_n(0.0, count));
-        if data.len() > self.max_samples {
-            let excess = data.len() - self.max_samples;
-            data.drain(..excess);
-            self.dropped.fetch_add(excess as u64, Ordering::Relaxed);
-        }
+        self.push_values(count, std::iter::repeat_n(0.0, count), None);
     }
 
     /// Preenche `out` com o que houver e completa com silencio. Devolve quantas amostras reais.
     pub fn pop_into(&self, out: &mut [f32]) -> usize {
+        self.pop_at(out, None)
+    }
+
+    fn pop_at(&self, out: &mut [f32], at: Option<Instant>) -> usize {
         let mut data = lock(&self.data);
-        let n = out.len().min(data.len());
-        for (slot, value) in out.iter_mut().zip(data.drain(..n)) {
+        let occupancy = data.samples.len();
+        if let Some(lab) = &mut data.lab {
+            let stats = &mut lab.stats;
+            stats.pops = stats.pops.saturating_add(1);
+            stats.occupancy_sum_samples =
+                stats.occupancy_sum_samples.saturating_add(occupancy as u64);
+            stats.occupancy_max_samples = stats.occupancy_max_samples.max(occupancy as u64);
+            stats.empty_pops += u64::from(occupancy == 0);
+            stats.underrun_pops += u64::from(occupancy < out.len());
+            if let Some(stamp) = lab.stamps.front() {
+                let age = at
+                    .unwrap_or_else(Instant::now)
+                    .saturating_duration_since(stamp.enqueued)
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64;
+                stats.age_observations = stats.age_observations.saturating_add(1);
+                stats.age_sum_us = stats.age_sum_us.saturating_add(age);
+                stats.age_max_us = stats.age_max_us.max(age);
+            }
+        }
+        let n = out.len().min(occupancy);
+        for (slot, value) in out.iter_mut().zip(data.samples.drain(..n)) {
             *slot = value;
         }
+        data.discard_stamps(n);
         out[n..].fill(0.0);
         n
     }
 
     pub fn len(&self) -> usize {
-        lock(&self.data).len()
+        lock(&self.data).samples.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -94,6 +226,34 @@ impl Ring {
     /// Amostras descartadas por excesso desde a criacao.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    pub fn lab_stats(&self) -> Option<RingStats> {
+        lock(&self.data).lab.as_ref().map(|lab| lab.stats)
+    }
+
+    // Fora de mix/pop: um snapshot cumulativo por segundo e um final no Drop.
+    fn report_lab_stats(&self, final_snapshot: bool) {
+        if !self.lab_enabled {
+            return;
+        }
+        let snapshot = lock(&self.data).lab.as_ref().map(|lab| (lab.id, lab.stats));
+        if let Some((id, s)) = snapshot {
+            tracing::info!(target: "madscreen_audio::av20",
+                av20_schema = 1, ring_id = id, capacity_samples = self.max_samples,
+                pops = s.pops, occupancy_sum_samples = s.occupancy_sum_samples,
+                occupancy_max_samples = s.occupancy_max_samples, empty_pops = s.empty_pops,
+                underrun_pops = s.underrun_pops, age_observations = s.age_observations,
+                age_sum_us = s.age_sum_us, age_max_us = s.age_max_us,
+                dropped_samples = self.dropped(), final_snapshot = u8::from(final_snapshot),
+                "AV20_RING_STATS");
+        }
+    }
+}
+
+impl Drop for Ring {
+    fn drop(&mut self) {
+        self.report_lab_stats(true);
     }
 }
 
@@ -206,6 +366,7 @@ impl MixerThread {
                     let mut produced: u64 = 0;
                     let mut mixer = BlockMixer::new();
                     let mut snapshot: Vec<Arc<Ring>> = Vec::new();
+                    let mut next_report_us = 1_000_000_u64;
                     while !stop.load(Ordering::Acquire) {
                         let elapsed_us = start.elapsed().as_micros() as u64;
                         let due = elapsed_us * u64::from(SAMPLE_RATE)
@@ -213,6 +374,12 @@ impl MixerThread {
                             / FRAMES_PER_BLOCK as u64;
                         if due.saturating_sub(produced) > MAX_CATCHUP_BLOCKS {
                             produced = due - 1;
+                        }
+                        if elapsed_us >= next_report_us {
+                            for ring in &snapshot {
+                                ring.report_lab_stats(false);
+                            }
+                            next_report_us = elapsed_us.saturating_add(1_000_000);
                         }
                         if produced < due {
                             snapshot.clear();
@@ -257,6 +424,124 @@ impl Drop for MixerThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lab_parse_limits_and_default_are_explicit() {
+        assert_eq!(parse_lab_ring_ms(None), Ok(None));
+        assert_eq!(parse_lab_ring_ms(Some("20")), Ok(Some(20)));
+        for value in ["10", "200"] {
+            assert!(parse_lab_ring_ms(Some(value)).is_ok());
+        }
+        for value in [
+            "",
+            "0",
+            "9",
+            "201",
+            "20.0",
+            " 20",
+            "+20",
+            "-1",
+            "999999999999999999999999",
+        ] {
+            assert!(parse_lab_ring_ms(Some(value)).is_err(), "{value}");
+        }
+        let default = Ring::new();
+        assert_eq!(default.max_samples, 19200);
+        assert!(default.lab_stats().is_none());
+        assert!(Ring::with_lab_capacity_ms(0).is_err());
+    }
+
+    #[test]
+    fn lab_occupancy_and_oldest_residence_are_measured_before_pop() {
+        let ring = Ring::with_lab_capacity_ms(20).unwrap();
+        let start = Instant::now();
+        ring.push_values(960, std::iter::repeat_n(0.1, 960), Some(start));
+        ring.push_values(
+            960,
+            std::iter::repeat_n(0.2, 960),
+            Some(start + Duration::from_millis(5)),
+        );
+        let mut out = [0.0; 960];
+        ring.pop_at(&mut out, Some(start + Duration::from_millis(10)));
+        assert_eq!(out[0], 0.1);
+        ring.pop_at(&mut out, Some(start + Duration::from_millis(15)));
+        assert_eq!(out[0], 0.2);
+        ring.pop_at(&mut out, Some(start + Duration::from_millis(20)));
+        let stats = ring.lab_stats().unwrap();
+        assert_eq!(stats.pops, 3);
+        assert_eq!(stats.occupancy_sum_samples, 2880);
+        assert_eq!(
+            samples_duration_ms(stats.occupancy_sum_samples / stats.pops),
+            10.0
+        );
+        assert_eq!(samples_duration_ms(stats.occupancy_max_samples), 20.0);
+        assert_eq!(stats.age_observations, 2);
+        assert_eq!(stats.age_sum_us, 20000);
+        assert_eq!(stats.age_max_us, 10000);
+        assert_eq!(stats.empty_pops, 1);
+        assert_eq!(stats.underrun_pops, 1);
+    }
+
+    #[test]
+    fn lab_overflow_partial_pop_and_silence_keep_matching_timestamps() {
+        let ring = Ring::with_lab_capacity_ms(20).unwrap();
+        let start = Instant::now();
+        ring.push_values(960, std::iter::repeat_n(1.0, 960), Some(start));
+        ring.push_values(
+            960,
+            std::iter::repeat_n(2.0, 960),
+            Some(start + Duration::from_millis(5)),
+        );
+        ring.push_values(
+            480,
+            std::iter::repeat_n(3.0, 480),
+            Some(start + Duration::from_millis(10)),
+        );
+        assert_eq!(ring.dropped(), 480);
+        ring.pop_at(&mut [0.0; 480], Some(start + Duration::from_millis(15)));
+        ring.pop_at(&mut [0.0; 960], Some(start + Duration::from_millis(20)));
+        ring.pop_at(&mut [0.0; 480], Some(start + Duration::from_millis(25)));
+        let stats = ring.lab_stats().unwrap();
+        assert_eq!(stats.age_sum_us, 45000);
+        assert_eq!(stats.age_max_us, 15000);
+        ring.push_silence(4800);
+        assert_eq!(ring.len(), 1920);
+        assert_eq!(ring.dropped(), 480 + 2880);
+        assert_eq!(ring.pop_into(&mut [1.0; 1920]), 1920);
+        assert_eq!(ring.lab_stats().unwrap().age_observations, 4);
+    }
+
+    #[test]
+    fn lab_pushes_do_not_grow_preallocated_storage_and_keep_latest_pcm() {
+        let ring = Ring::with_lab_capacity_ms(10).unwrap();
+        let capacities = {
+            let data = lock(&ring.data);
+            (
+                data.samples.capacity(),
+                data.lab.as_ref().unwrap().stamps.capacity(),
+            )
+        };
+        for _ in 0..2000 {
+            ring.push(&[1.0]);
+        }
+        ring.push(&[2.0; 1920]);
+        let data = lock(&ring.data);
+        assert_eq!(data.samples.capacity(), capacities.0);
+        assert_eq!(data.lab.as_ref().unwrap().stamps.capacity(), capacities.1);
+        assert_eq!(data.samples.len(), 960);
+        assert!(data.samples.iter().all(|v| *v == 2.0));
+        assert_eq!(
+            data.lab
+                .as_ref()
+                .unwrap()
+                .stamps
+                .iter()
+                .map(|s| s.samples)
+                .sum::<usize>(),
+            960
+        );
+        assert_eq!(ring.dropped(), 2960);
+    }
 
     #[test]
     fn mute_gate_sends_silence_and_restores_only_new_blocks() {

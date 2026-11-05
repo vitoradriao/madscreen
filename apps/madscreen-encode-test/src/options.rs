@@ -262,7 +262,7 @@ pub struct Options {
     pub h264_profile: H264ProfileArg,
     #[arg(long, value_enum, default_value = "p1")]
     pub preset: PresetArg,
-    /// Bitrate em Mbps decimais.
+    /// Bitrate em Mbps decimais; sem esta opcao usa a regra automatica por pixels/FPS.
     #[arg(long,default_value="18",value_parser=bitrate)]
     pub bitrate: u32,
     /// Histórico local de contadores; desligue com --diagnostics false ou MADSCREEN_DIAGNOSTICS=false.
@@ -299,7 +299,7 @@ pub struct Options {
     /// Escolha efetiva de altura para planejamento em runtime; zero significa nativa.
     #[arg(skip)]
     pub height_choice: Option<u32>,
-    /// Recalcula o bitrate pela saída planejada; ativado pelo IPC quando não há bitrate explícito.
+    /// Recalcula o bitrate pela saida efetiva; CLI/IPC sem bitrate explicito.
     #[arg(skip)]
     pub bitrate_auto: bool,
     #[arg(long,default_value_t=1,value_parser=clap::value_parser!(u32).range(1..))]
@@ -441,6 +441,12 @@ pub struct Options {
     pub identity: String,
 }
 impl Options {
+    pub fn from_cli_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        let mut options = <Self as clap::FromArgMatches>::from_arg_matches(matches)?;
+        options.bitrate_auto =
+            matches.value_source("bitrate") == Some(clap::parser::ValueSource::DefaultValue);
+        Ok(options)
+    }
     #[cfg(all(windows, feature = "publish"))]
     pub fn audio_requested(&self) -> bool {
         self.audio_system || !self.audio_pids.is_empty() || self.audio_follow_window
@@ -473,7 +479,11 @@ impl Options {
             width,
             height,
             fps: self.fps,
-            bitrate_bps: self.bitrate,
+            bitrate_bps: if self.bitrate_auto {
+                madscreen_ipc::resolution::auto_bitrate_bps(width, height, self.fps.as_f64())
+            } else {
+                self.bitrate
+            },
             vbv_frames: self.vbv_frames,
             preset,
             spatial_aq: self.spatial_aq,
@@ -630,6 +640,32 @@ mod tests {
         }
         let o = Options::try_parse_from(["encode", "--duration", "0", "--compare-presets"])?;
         assert!(o.config(1920, 1080, Preset::P1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cli_omitted_bitrate_uses_auto_but_explicit_default_value_stays_explicit()
+    -> anyhow::Result<()> {
+        use clap::CommandFactory;
+        let matches = Options::command().try_get_matches_from(["encode", "--fps", "30"])?;
+        let automatic = Options::from_cli_matches(&matches)?;
+        assert!(automatic.bitrate_auto);
+        assert_eq!(
+            automatic.config(1280, 720, Preset::P1)?.bitrate_bps,
+            madscreen_ipc::resolution::auto_bitrate_bps(1280, 720, 30.0)
+        );
+        let matches = Options::command().try_get_matches_from([
+            "encode",
+            "--fps",
+            "30",
+            "--bitrate",
+            "18",
+        ])?;
+        let explicit = Options::from_cli_matches(&matches)?;
+        assert!(!explicit.bitrate_auto);
+        let mut config = explicit.config(1280, 720, Preset::P1)?;
+        assert_eq!(config.bitrate_bps, 18_000_000);
+        assert_eq!(config.clamp_h264_bitrate(), Some((18_000_000, 14_000_000)));
         Ok(())
     }
 }

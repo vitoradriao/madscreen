@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+madscreen-ipc = { path = "../madscreen-ipc" }
 madscreen-telemetry = { path = "../madscreen-telemetry" }
 madscreen-capture = { path = "../madscreen-capture" }
 thiserror.workspace = true

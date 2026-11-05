@@ -117,6 +117,49 @@ impl Default for EncoderConfig {
     }
 }
 impl EncoderConfig {
+    /// Teto do nivel efetivo. High sem nivel explicito conserva a escolha automatica
+    /// do driver; CB/Main sem nivel usam o mesmo planejador limitado a 3.1..5.2.
+    pub fn h264_bitrate_limit(&self) -> Option<(u32, u32)> {
+        if self.codec != VideoCodec::H264 {
+            return None;
+        }
+        let level = self.h264_level.or_else(|| {
+            (self.h264_profile != H264Profile::High)
+                .then(|| {
+                    madscreen_ipc::resolution::h264_level(
+                        self.width,
+                        self.height,
+                        self.fps.as_f64(),
+                    )
+                })
+                .flatten()
+        })?;
+        let base = madscreen_ipc::resolution::h264_max_bitrate_bps(level)?;
+        let max_bps = if self.h264_profile == H264Profile::High {
+            base / 4 * 5
+        } else {
+            base
+        };
+        Some((level, max_bps))
+    }
+
+    /// Defesa antes de abrir/reconfigurar qualquer backend, sem trocar o perfil.
+    /// Retorna pedido/efetivo somente quando houve clamp.
+    pub fn clamp_h264_bitrate(&mut self) -> Option<(u32, u32)> {
+        let (level, max_bps) = self.h264_bitrate_limit()?;
+        // Fixar o nivel inferido impede o driver de escolher outro limite por dimensoes.
+        self.h264_level = Some(level);
+        if self.bitrate_bps <= max_bps {
+            return None;
+        }
+        let requested = self.bitrate_bps;
+        self.bitrate_bps = max_bps;
+        tracing::warn!(requested_bps=requested, effective_bps=max_bps, level_idc=level,
+            profile=?self.h264_profile,
+            "Bitrate pedido excede o teto do perfil/nivel H.264; aplicando limite antes de iniciar ou reconfigurar o encoder");
+        Some((requested, max_bps))
+    }
+
     pub fn validate(&self) -> Result<()> {
         FrameRate::new(self.fps.num, self.fps.den)?;
         if self.codec == VideoCodec::H264
@@ -191,6 +234,76 @@ impl EncoderConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn h264_bitrate_limits_cover_cb_main_high_and_every_level() {
+        for (level, base) in [
+            (31, 14_000_000),
+            (32, 20_000_000),
+            (40, 20_000_000),
+            (41, 50_000_000),
+            (42, 50_000_000),
+            (50, 135_000_000),
+            (51, 240_000_000),
+            (52, 240_000_000),
+        ] {
+            for profile in [
+                H264Profile::ConstrainedBaseline,
+                H264Profile::Main,
+                H264Profile::High,
+            ] {
+                let limit = if profile == H264Profile::High {
+                    base / 4 * 5
+                } else {
+                    base
+                };
+                let mut c = EncoderConfig {
+                    h264_level: Some(level),
+                    h264_profile: profile,
+                    bitrate_bps: limit + 1,
+                    ..Default::default()
+                };
+                assert_eq!(c.h264_bitrate_limit(), Some((level, limit)));
+                assert_eq!(c.clamp_h264_bitrate(), Some((limit + 1, limit)));
+                assert_eq!(c.bitrate_bps, limit);
+                assert_eq!(c.clamp_h264_bitrate(), None);
+                c.bitrate_bps = limit - 1;
+                assert_eq!(c.clamp_h264_bitrate(), None);
+            }
+        }
+    }
+    #[test]
+    fn auto_cb_main_pin_level_and_clamp_but_high_auto_and_other_codecs_are_preserved() {
+        for profile in [H264Profile::ConstrainedBaseline, H264Profile::Main] {
+            let mut c = EncoderConfig {
+                width: 1280,
+                height: 720,
+                fps: FrameRate { num: 30, den: 1 },
+                h264_profile: profile,
+                ..Default::default()
+            };
+            assert_eq!(c.clamp_h264_bitrate(), Some((18_000_000, 14_000_000)));
+            assert_eq!(c.h264_level, Some(31));
+            c.bitrate_bps = 18_000_000; // subida posterior nao pode desfazer o limite.
+            assert_eq!(c.clamp_h264_bitrate(), Some((18_000_000, 14_000_000)));
+        }
+        let mut high = EncoderConfig {
+            width: 1280,
+            height: 720,
+            fps: FrameRate { num: 30, den: 1 },
+            h264_profile: H264Profile::High,
+            ..Default::default()
+        };
+        assert_eq!(high.clamp_h264_bitrate(), None);
+        assert_eq!(high.h264_level, None);
+        assert_eq!(high.bitrate_bps, 18_000_000);
+        high.h264_level = Some(31);
+        assert_eq!(high.clamp_h264_bitrate(), Some((18_000_000, 17_500_000)));
+        high.codec = VideoCodec::Hevc;
+        high.bitrate_bps = 18_000_000;
+        assert_eq!(high.clamp_h264_bitrate(), None);
+        high.codec = VideoCodec::Av1;
+        assert_eq!(high.clamp_h264_bitrate(), None);
+    }
     #[test]
     fn validation_and_rational_vbv() -> Result<()> {
         let mut c = EncoderConfig::default();

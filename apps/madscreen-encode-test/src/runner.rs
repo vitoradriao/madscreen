@@ -628,13 +628,14 @@ pub(crate) fn run_profile(
         },
     );
     let mut options = options.clone();
-    if let Some(plan) = &plan {
-        if options.bitrate_auto {
-            options.bitrate = auto_bitrate_bps(plan.width, plan.height, fps);
-        }
+    if options.bitrate_auto {
+        options.bitrate = auto_bitrate_bps(size.width, size.height, fps);
     }
-    let options = &options;
     let mut config = options.config(size.width, size.height, preset)?;
+    config.h264_level = plan.as_ref().map(|p| p.level);
+    config.clamp_h264_bitrate();
+    options.bitrate = config.bitrate_bps;
+    let options = &options;
     if let Some(plan) = &plan {
         config.h264_level = Some(plan.level);
         let profile_reference = match config.h264_profile {

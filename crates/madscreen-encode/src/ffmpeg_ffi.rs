@@ -499,11 +499,12 @@ unsafe impl Send for FfmpegEncoder {}
 impl FfmpegEncoder {
     pub fn new(
         gpu: &GpuDevice,
-        config: EncoderConfig,
+        mut config: EncoderConfig,
         textures: &[ID3D11Texture2D],
         kind: BackendKind,
     ) -> Result<Self> {
         config.validate()?;
+        config.clamp_h264_bitrate();
         if config.codec != VideoCodec::H264 {
             return Err(unavailable(
                 "AMF/QuickSync/x264 suportam H.264 neste pipeline",
@@ -727,7 +728,8 @@ impl FfmpegEncoder {
         config.bitrate_bps = bitrate;
         config.fps = fps;
         config.validate()?;
-        if bitrate == self.config.bitrate_bps && fps == self.config.fps {
+        config.clamp_h264_bitrate();
+        if config.bitrate_bps == self.config.bitrate_bps && fps == self.config.fps {
             return Ok(());
         }
         if !self.pending.is_empty() {

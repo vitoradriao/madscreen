@@ -57,6 +57,7 @@ pub struct AudioCapture {
     mixer: mixer::MixerThread,
     active: Vec<Active>,
     failed: Vec<(AudioSourceSpec, String)>,
+    lab_ring_ms: Option<usize>,
 }
 
 impl AudioCapture {
@@ -64,12 +65,20 @@ impl AudioCapture {
     /// [`AudioCapture::failed_sources`]. O `sink` recebe um bloco de 10 ms por chamada, sempre,
     /// mesmo sem fontes (silencio).
     pub fn start(sources: &[AudioSourceSpec], sink: mixer::Sink) -> Result<Self, AudioError> {
+        let value = match std::env::var("AV20_RING_MS") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => return Err(AudioError::System("AV20_RING_MS invalido".into())),
+        };
+        let lab_ring_ms =
+            mixer::parse_lab_ring_ms(value.as_deref()).map_err(|e| AudioError::System(e.into()))?;
         let mixer = mixer::MixerThread::start(sink)
             .map_err(|e| AudioError::System(format!("thread de mixagem: {e}")))?;
         let mut capture = Self {
             mixer,
             active: Vec::new(),
             failed: Vec::new(),
+            lab_ring_ms,
         };
         capture.set_sources(sources);
         Ok(capture)
@@ -84,7 +93,16 @@ impl AudioCapture {
             if self.active.iter().any(|a| a.spec == *spec) {
                 continue;
             }
-            let ring = Arc::new(mixer::Ring::new());
+            let ring = Arc::new(match self.lab_ring_ms {
+                Some(ms) => match mixer::Ring::with_lab_capacity_ms(ms) {
+                    Ok(ring) => ring,
+                    Err(error) => {
+                        self.failed.push((*spec, error.into()));
+                        continue;
+                    }
+                },
+                None => mixer::Ring::new(),
+            });
             match platform::Loopback::start(*spec, ring.clone()) {
                 Ok(capture) => {
                     tracing::info!(?spec, "fonte de áudio iniciada");
