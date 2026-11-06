@@ -419,6 +419,22 @@ try {
   check(layout.root.querySelector(".featured-second"),"Atalho D não interfere no controle de volume");
   equal.click();
   check(!layout.root.querySelector(".featured-first, .featured-second") && equal.getAttribute("aria-pressed")==="true","Lado a lado restaura layout sem reconectar");
+  {
+    const grid=layout.root.querySelector<HTMLElement>(".watch-grid")!;
+    const divider=layout.root.querySelector<HTMLElement>(".watch-divider")!;
+    check(!divider.hidden && divider.getAttribute("role")==="separator","Divisor redimensionável aparece com duas telas");
+    for(let i=0;i<3;i++)divider.dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowRight",bubbles:true}));
+    check(grid.style.getPropertyValue("--split-a")==="0.65fr" && layout.root.querySelector(".featured-first"),"Setas no divisor aumentam a Tela 1 e definem o destaque");
+    const smallVideo=slots[1]!.querySelector("video")!;
+    smallVideo.dispatchEvent(new PointerEvent("pointerdown",{bubbles:true,button:0}));smallVideo.click();
+    check(grid.style.getPropertyValue("--split-a")==="0.35fr" && layout.root.querySelector(".featured-second"),"Clicar na tela menor troca os tamanhos mantendo o ajuste");
+    const bigButton=slots[1]!.querySelector<HTMLButtonElement>(".audio-ctl button")!;
+    slots[0]!.querySelector(".audio-ctl button")!.dispatchEvent(new PointerEvent("pointerdown",{bubbles:true,button:0}));
+    check(layout.root.querySelector(".featured-second") && bigButton,"Clicar em controle da tela menor não troca os tamanhos");
+    divider.dispatchEvent(new MouseEvent("dblclick",{bubbles:true}));
+    check(!layout.root.querySelector(".featured-first, .featured-second") && grid.style.getPropertyValue("--split-a")==="0.5fr","Duplo clique no divisor iguala as telas");
+    buttons.find(button=>button.textContent==="Tela 2")!.click();
+  }
   mute0.click();slots[1]!.querySelector<HTMLButtonElement>(".audio-ctl button")!.click();
   const savedAudio=localStorage.getItem("ms.audio.viewer.bob");
   const audioMode=layout.root.querySelector<HTMLInputElement>('input[type="checkbox"]')!;

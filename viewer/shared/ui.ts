@@ -760,9 +760,27 @@ export function createWatchLayout(client: MadClient, options: WatchOptions & { o
   add.addEventListener("click", () => options.onAdd?.());
   const hint = el("p", { class: "small faint", textContent: "Com duas transmissões abertas, a próxima substitui a tela selecionada." });
   const root = el("div", { class: "watch-layout stack" }, controls, hint, grid);
+  // Fração do espaço da Tela 1; o destaque é só a tela maior. Arrastar o divisor ajusta livremente.
+  let ratio = 0.5;
+  const FEATURED_RATIO = 0.7, MIN_RATIO = 0.2, MAX_RATIO = 0.8;
+  const setRatio = (next: number): void => {
+    ratio = Math.round(Math.min(MAX_RATIO, Math.max(MIN_RATIO, next)) * 1000) / 1000;
+    if (Math.abs(ratio - 0.5) < 0.02) ratio = 0.5;
+    featured = ratio > 0.5 ? 0 : ratio < 0.5 ? 1 : null;
+  };
+  const divider = el("div", { class: "watch-divider", tabIndex: 0, hidden: true });
+  divider.setAttribute("role", "separator");
+  divider.setAttribute("aria-label", "Redimensionar transmissões (arraste, setas ou duplo clique para igualar)");
+  divider.title = "Arraste para redimensionar · duplo clique para igualar";
   const update = (): void => {
     const count = users.filter(Boolean).length;
-    if (count < 2) featured = null;
+    if (count < 2) { featured = null; ratio = 0.5; }
+    grid.style.setProperty("--split-a", `${ratio}fr`);
+    grid.style.setProperty("--split-b", `${1 - ratio}fr`);
+    divider.hidden = count < 2;
+    divider.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
+    divider.setAttribute("aria-valuemin", String(MIN_RATIO * 100));
+    divider.setAttribute("aria-valuemax", String(MAX_RATIO * 100));
     grid.classList.toggle("split", count === 2);
     grid.classList.toggle("featured-first", count === 2 && featured === 0);
     grid.classList.toggle("featured-second", count === 2 && featured === 1);
@@ -782,13 +800,48 @@ export function createWatchLayout(client: MadClient, options: WatchOptions & { o
       panels[index]!.setBackgroundMuted(count === 2 && onlyFeaturedAudio && index !== (featured ?? selected));
     }
   };
+  /** Sem destaque, a selecionada vira a maior; com destaque, as telas trocam de tamanho (mantém o ajuste arrastado). */
   const swapFeature = (): void => {
-    featured = featured === null ? selected : 1 - featured;
-    selected = featured;
+    setRatio(featured === null ? (selected === 0 ? FEATURED_RATIO : 1 - FEATURED_RATIO) : 1 - ratio);
+    selected = featured ?? selected;
     update();
   };
   swap.addEventListener("click", swapFeature);
-  equal.addEventListener("click", () => { featured = null; update(); });
+  equal.addEventListener("click", () => { setRatio(0.5); update(); });
+  // Divisor: horizontal lado a lado; vertical quando a janela estreita empilha as telas.
+  const stacked = (): boolean => slots[1]!.getBoundingClientRect().top >= slots[0]!.getBoundingClientRect().bottom - 1;
+  divider.addEventListener("pointerdown", event => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    divider.setPointerCapture(event.pointerId);
+    divider.classList.add("dragging");
+    const vertical = stacked();
+    const box = grid.getBoundingClientRect();
+    const size = (vertical ? box.height : box.width) - (vertical ? divider.offsetHeight : divider.offsetWidth);
+    const move = (moveEvent: PointerEvent): void => {
+      if (size <= 0) return;
+      const offset = vertical ? moveEvent.clientY - box.top : moveEvent.clientX - box.left;
+      setRatio((offset - (vertical ? divider.offsetHeight : divider.offsetWidth) / 2) / size);
+      update();
+    };
+    const end = (): void => {
+      divider.classList.remove("dragging");
+      divider.removeEventListener("pointermove", move);
+      divider.removeEventListener("pointerup", end);
+      divider.removeEventListener("pointercancel", end);
+    };
+    divider.addEventListener("pointermove", move);
+    divider.addEventListener("pointerup", end);
+    divider.addEventListener("pointercancel", end);
+  });
+  divider.addEventListener("dblclick", () => { setRatio(0.5); update(); });
+  divider.addEventListener("keydown", event => {
+    const step = { ArrowLeft: -0.05, ArrowUp: -0.05, ArrowRight: 0.05, ArrowDown: 0.05 }[event.key];
+    if (step === undefined && event.key !== "Home" && event.key !== "End") return;
+    event.preventDefault();
+    setRatio(event.key === "Home" ? MIN_RATIO : event.key === "End" ? MAX_RATIO : ratio + step!);
+    update();
+  });
   audioMode.addEventListener("change", () => { onlyFeaturedAudio = audioMode.checked; update(); });
   const onLayoutKey = (event: KeyboardEvent): void => {
     if (event.key.toLowerCase() !== "d" || event.repeat || event.ctrlKey || event.metaKey || event.altKey ||
@@ -821,9 +874,22 @@ export function createWatchLayout(client: MadClient, options: WatchOptions & { o
     panels.push(panel);
     const slot = el("div", { class: "watch-slot", role: "group" }, panel.root);
     slot.setAttribute("aria-label", `Tela ${index + 1}`);
-    slot.addEventListener("pointerdown", () => { selected = index; update(); });
+    // Clicar no vídeo da tela menor (fora dos controles) troca os tamanhos: ela vira a maior.
+    let swapOnClick = false;
+    slot.addEventListener("pointerdown", event => {
+      const target = event.target instanceof Element ? event.target : null;
+      swapOnClick = event.button === 0 && featured !== null && featured !== index && users.every(Boolean) &&
+        !target?.closest("button, input, select, textarea, label, a, [role=slider], [role=button], summary, .banner, .watch-diagnostics");
+      selected = index; update();
+    });
+    slot.addEventListener("click", () => {
+      if (!swapOnClick) return;
+      swapOnClick = false;
+      if (featured !== null && featured !== index) { setRatio(1 - ratio); selected = index; update(); }
+    });
     slot.addEventListener("focusin", () => { selected = index; update(); });
     slots.push(slot); grid.append(slot);
+    if (index === 0) grid.append(divider);
   }
   controls.append(swap, equal, audioLabel, add);
   update();

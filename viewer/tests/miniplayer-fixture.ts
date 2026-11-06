@@ -85,6 +85,27 @@ export async function checkMiniPlayer(check: (ok: unknown, label: string) => voi
     failShow=false;handle=await openMiniPlayerWithHost(stage,"Novamente",host);
     handle.close();
     check(stage.ownerDocument===document && calls.at(-1)?.args.action==="close", "Fim/logout fecha janela e conserva o elemento para limpeza da sessão");
+    // Duas transmissões do layout podem ir para mini-players ao mesmo tempo; uma terceira não.
+    const iframe2=document.createElement("iframe");document.body.append(iframe2);
+    const stage2=document.createElement("div");stage2.className="stage";
+    const video2=document.createElement("video");stage2.append(video2);document.body.append(stage2);
+    const stage3=document.createElement("div");document.body.append(stage3);
+    try {
+      const first=await openMiniPlayerWithHost(stage,"Primeira",host);
+      const firstToken=token;
+      window.open=(() => ({document:iframe2.contentDocument!,get closed(){return popupClosed;}})) as typeof window.open;
+      const second=await openMiniPlayerWithHost(stage2,"Segunda",host);
+      check(video.ownerDocument===iframe.contentDocument && video2.ownerDocument===iframe2.contentDocument && firstToken!==token,
+        "Duas transmissões abrem mini-players simultâneos com tokens próprios");
+      let thirdRejected=false;
+      try { await openMiniPlayerWithHost(stage3,"Terceira",host); } catch { thirdRejected=true; }
+      check(thirdRejected && stage3.ownerDocument===document && stage3.isConnected, "Terceiro mini-player é recusado");
+      second.close();first.close();
+      check(video.ownerDocument===document && video2.ownerDocument===document, "Fechar os dois devolve ambos os palcos");
+    } finally {
+      window.open=(() => ({document:iframe.contentDocument!,get closed(){return popupClosed;}})) as typeof window.open;
+      stage2.remove();stage3.remove();iframe2.remove();
+    }
   } finally {
     for (const entry of [...listeners]) entry.handler({payload:token});
     window.open=open;stage.remove();iframe.remove();

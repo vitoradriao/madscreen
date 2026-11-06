@@ -59,11 +59,7 @@ body { overflow: hidden; }
 .watch-view .watch-diagnostics[open] { max-height: 180px; overflow: auto; }
 .watch-view .watch-panel > .stage { flex: 1; height: auto; min-height: 0; aspect-ratio: auto; }
 .watch-view .stage:fullscreen { flex: none; height: 100%; }
-@media (max-width: 900px) { .watch-view .watch-grid.split { grid-template-rows: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 900px) {
-  .watch-view .watch-grid.split.featured-first { grid-template-rows: minmax(0, 7fr) minmax(0, 3fr); }
-  .watch-view .watch-grid.split.featured-second { grid-template-rows: minmax(0, 3fr) minmax(0, 7fr); }
-}
+@media (max-width: 900px) { .watch-view .watch-grid.split { grid-template-rows: minmax(0, var(--split-a, 1fr)) var(--sp-4) minmax(0, var(--split-b, 1fr)); } }
 .watch-view .stage video { cursor: pointer; }
 .watch-compact { position: fixed; right: var(--sp-4); bottom: var(--sp-4); z-index: 20; width: min(360px, calc(100vw - 32px)); padding: var(--sp-3); display: grid; gap: var(--sp-3); background: var(--surface-1); border: 1px solid var(--border-strong); border-radius: var(--r-lg); box-shadow: var(--shadow-floating); }
 .watch-compact > .btn { justify-self: start; }
