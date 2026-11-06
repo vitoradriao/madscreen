@@ -180,6 +180,17 @@ jobs:
           $installerPath = "apps/madscreen-app/src-tauri/target/release/bundle/nsis/madscreen_${releaseVersion}_x64-setup.exe"
           cargo run --manifest-path apps/madscreen-app/src-tauri/Cargo.toml --example verify-update -- target/release-manifest/latest.json $installerPath apps/madscreen-app/src-tauri/tauri.conf.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # #9 publico: os mesmos bytes com um byte adulterado devem ser recusados (minisign-verify, como no plugin).
+          $tampered = Join-Path $env:RUNNER_TEMP 'tampered-setup.exe'
+          $bytes = [IO.File]::ReadAllBytes((Resolve-Path $installerPath))
+          $bytes[[int]($bytes.Length / 2)] = $bytes[[int]($bytes.Length / 2)] -bxor 0xFF
+          [IO.File]::WriteAllBytes($tampered, $bytes)
+          $PSNativeCommandUseErrorActionPreference = $false
+          cargo run --manifest-path apps/madscreen-app/src-tauri/Cargo.toml --example verify-update -- target/release-manifest/latest.json $tampered apps/madscreen-app/src-tauri/tauri.conf.json
+          if ($LASTEXITCODE -eq 0) { throw 'Instalador adulterado foi aceito pela verificacao de assinatura' }
+          Write-Host 'Instalador adulterado recusado pela verificacao de assinatura'
+          Remove-Item -LiteralPath $tampered
+          $global:LASTEXITCODE = 0
       - name: Publicar instalador
         uses: actions/upload-artifact@v4
         with:

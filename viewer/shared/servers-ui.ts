@@ -396,8 +396,7 @@ export function createServers(client: MadClient, options: ServerOptions) {
           presence?.replaceChildren(svg(icon("radio", "sm")));
           presence?.setAttribute("title", "Ao vivo");
         }
-        const name = el("span", { class: "name", textContent: person.displayName });
-        if (person.id === client.session?.user.id) name.append(el("span", { class: "you" }, "(você)"));
+        const name = el("span", { class: "name" }, el("span", { class: "member-name", textContent: person.displayName, title: person.displayName }));
         if (person.role !== "member") name.append(el("span", { class: "role" }, person.role === "owner" ? "Dono" : "Admin"));
         const row = el("div", { class: `member member-row${person.online ? "" : " offline"}` }, portrait,
           el("div", { class: "text member-identity" }, name, el("span", { class: "activity", textContent: live ? `Ao vivo · ${live.live?.title || "Tela compartilhada"}` : person.online ? "Online" : "Offline" })));

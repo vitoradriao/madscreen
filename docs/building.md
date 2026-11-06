@@ -1,3 +1,5 @@
+[English](building.en.md)
+
 # Compilar, testar e depurar
 
 ## Requisitos

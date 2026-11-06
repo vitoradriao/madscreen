@@ -27,7 +27,7 @@ Três temas com os mesmos nomes de token: **Grafite** (`dark`, o padrão), **Pap
 - Controles usam `border-strong` (≥3:1). `border` é decorativa, exceto no Alto contraste, onde passa de 3:1 e faz a separação.
 - **Tudo que fica sobre vídeo** (`.tile`, `.stage`) usa `overlay` para pílulas e `scrim` para o degradê da base, e no tema Papel leva `data-theme="dark"`: o cromo sobre imagem é sempre escuro.
 - **Alto contraste** é um tema a mais: fundo preto puro, texto a 7:1 (WCAG AAA), bordas que separam superfícies, sem sombra. Ofereça-o em Conta.
-- Fotos de avatar recebem `grayscale(1)`.
+- Fotos de avatar preservam as cores originais, em todos os temas.
 
 ## Tipografia
 

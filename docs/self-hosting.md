@@ -1,3 +1,5 @@
+[English](self-hosting.en.md)
+
 # Rodar o seu próprio servidor
 
 O app precisa de um **Worker de sinalização** (contas, servidores, canais, convites, presença e o plano de controle do

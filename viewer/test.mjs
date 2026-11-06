@@ -21,3 +21,16 @@ await build({
   external: ["@tauri-apps/plugin-updater"],
 });
 await import(updatesOutput.href);
+
+// Falhas do atualizador (#9 público): rede cortada, assinatura inválida, nenhuma ação automática.
+const updateFailuresOutput = new URL("../target/viewer-tests/updates-failures.test.mjs", import.meta.url);
+await build({
+  entryPoints: [fileURLToPath(new URL("tests/updates-failures.test.mjs", import.meta.url))],
+  bundle: true, outfile: fileURLToPath(updateFailuresOutput), platform: "node", format: "esm", target: "es2022",
+  alias: {
+    "@tauri-apps/api/core": fileURLToPath(new URL("tests/fake-tauri-core.mjs", import.meta.url)),
+    "@tauri-apps/api/event": fileURLToPath(new URL("tests/fake-tauri-event.mjs", import.meta.url)),
+  },
+  external: ["@tauri-apps/plugin-updater"],
+});
+await import(updateFailuresOutput.href);

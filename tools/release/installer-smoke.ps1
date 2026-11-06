@@ -104,7 +104,7 @@ if (-not (Test-SmokePermission $env:GITHUB_ACTIONS $IUnderstandThisInstalls.IsPr
 }
 
 $result = [ordered]@{ schema = 1; ok = $false; upgrade = 'sem-upgrade'; steps = @() }
-$stage = 'inputs'; $ready = $false; $attemptedInstall = $false; $installRoot = $null; $contract = $null; $workRoot = $null; $repoRoot = $null
+$stage = 'inputs'; $ready = $false; $seededUserData = $false; $userDataRoots = @(); $attemptedInstall = $false; $installRoot = $null; $contract = $null; $workRoot = $null; $repoRoot = $null
 function Add-SmokeStep { param([string]$Name, [bool]$Ok, $Detail); $script:result.steps += @{ stage = $Name; ok = $Ok; detail = $Detail } }
 function Assert-Smoke { param([bool]$Value, [string]$Reason = 'Verificacao do smoke falhou'); if (-not $Value) { throw $Reason } }
 function Get-SmokeTree {
@@ -146,6 +146,57 @@ function Invoke-SmokeProcess {
         $process.Refresh()
         Assert-Smoke ($process.ExitCode -eq 0) "Processo NSIS terminou com exit code $($process.ExitCode)"
     } finally { $process.Dispose() }
+}
+function Get-SmokeUserDataRoots {
+    param([string]$Identifier)
+    # Tauri: app_config_dir = %APPDATA%\<identifier> (settings.json); WebView2 = %LOCALAPPDATA%\<identifier> (sessao/localStorage).
+    if ($Identifier -notmatch '^[A-Za-z0-9.-]+$') { throw 'Identificador invalido' }
+    return @((Join-Path $env:APPDATA $Identifier), (Join-Path $env:LOCALAPPDATA $Identifier))
+}
+function New-SmokeUserData {
+    # Dados no formato do app (o app nao e aberto no runner): preferencias, sessao e canal em localStorage do WebView2.
+    param([string[]]$Roots)
+    foreach ($root in $Roots) { Assert-Smoke (-not (Test-Path -LiteralPath $root)) 'Dados do app preexistentes' }
+    New-Item -ItemType Directory -Path $Roots[0] | Out-Null
+    Set-Content -LiteralPath (Join-Path $Roots[0] 'settings.json') -Encoding UTF8 -Value '{"quality_height":1080,"quality_fps":60,"tray_notice_seen":true,"software_video_decode":false}'
+    $storage = Join-Path $Roots[1] 'EBWebView\Default\Local Storage\leveldb'
+    New-Item -ItemType Directory -Path $storage -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $storage 'smoke-session.log') -Encoding UTF8 -Value 'ms.session={"token":"smoke-not-a-secret","user":{"id":"smoke"}}'
+    $script:seededUserData = $true
+    return Get-SmokeUserDataHash $Roots
+}
+function Get-SmokeUserDataHash {
+    param([string[]]$Roots)
+    $all = @{}
+    foreach ($root in $Roots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        $tree = Get-SmokeTree $root
+        foreach ($key in $tree.Keys) { $all["$([IO.Path]::GetFileName($root))|$(Split-Path -Leaf (Split-Path -Parent $root))|$key"] = $tree[$key] }
+    }
+    return $all
+}
+function Assert-SmokeUserDataKept {
+    param([hashtable]$Before, [string[]]$Roots, [string]$When)
+    $after = Get-SmokeUserDataHash $Roots
+    $lost = @($Before.Keys | Where-Object { -not $after.ContainsKey($_) -or $after[$_] -ne $Before[$_] })
+    Assert-Smoke ($lost.Count -eq 0) "Dados do usuario alterados/perdidos ($When): $($lost -join ', ')"
+    return @{ files = $Before.Count; preserved = $true; when = $When }
+}
+function Invoke-SmokeInterruptedInstall {
+    # Mata o PROPRIO processo do instalador durante a copia; tenta atrasos menores ate interromper de fato.
+    param([string]$File, [string]$Arguments)
+    foreach ($delay in @(1500, 800, 400, 200, 100)) {
+        $process = Start-Process -FilePath $File -ArgumentList $Arguments -WorkingDirectory $script:workRoot -WindowStyle Hidden -PassThru
+        try {
+            $null = $process.Handle
+            if ($process.WaitForExit($delay)) { continue }
+            $process.Kill(); $null = $process.WaitForExit(30000)
+            # NSIS extrai num processo filho em alguns casos; nenhum instalador nosso pode sobrar rodando.
+            Start-Sleep -Milliseconds 500
+            return @{ interrupted = $true; killedAfterMs = $delay }
+        } finally { $process.Dispose() }
+    }
+    throw 'Instalador terminou antes de qualquer interrupcao; nao houve falha exercitada'
 }
 function Confirm-SmokeRegistration {
     param([version]$ExpectedVersion, [string]$ExpectedDisplay)
@@ -216,6 +267,8 @@ try {
         }
     }
     Assert-Smoke (-not (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA $contract.product)))
+    $userDataRoots = Get-SmokeUserDataRoots $config.identifier
+    foreach ($root in $userDataRoots) { Assert-Smoke (-not (Test-Path -LiteralPath $root)) 'Dados do app preexistentes' }
     Assert-Smoke (@(Get-Process -Name 'madscreen-app', 'madscreen-encode-test' -ErrorAction SilentlyContinue).Count -eq 0)
     Add-SmokeStep $stage $true 'Nenhuma instalacao/registro/processo preexistente; destino reservado novo'
 
@@ -266,6 +319,10 @@ try {
     Assert-Smoke ($bundleTree['NOTICE.md'] -eq (Get-SmokeHash (Join-Path $repoRoot 'tools/encode/NOTICE.md')))
     Add-SmokeStep $stage $true @{ archiveSha256 = $manifest.sha256; dlls = @($manifest.bundleDlls); installedLayout = 'encoder-runtime/ (DLLs e avisos planos)' }
 
+    $stage = 'user-data-seed'
+    $userData = New-SmokeUserData $userDataRoots
+    Add-SmokeStep $stage $true @{ files = $userData.Count; roots = @('%APPDATA%/[identifier]', '%LOCALAPPDATA%/[identifier]/EBWebView'); appOpened = $false }
+
     $old = @{}
     if ($PreviousInstaller) {
         $stage = 'install-previous'
@@ -294,6 +351,7 @@ try {
     Assert-Smoke ($actual.ContainsKey('uninstall.exe'))
     $changed = @($expected.Keys | Where-Object { $old.ContainsKey($_) -and $old[$_] -ne $actual[$_] })
     Add-SmokeStep $stage $true @{ version = $displayVersion; expectedFiles = $expected.Count; filesMatchNewInstaller = $true; previousFiles = $old.Count; replacedFiles = $changed; orphanFiles = @() }
+    Add-SmokeStep 'user-data-after-upgrade' $true (Assert-SmokeUserDataKept $userData $userDataRoots $result.upgrade)
     Add-SmokeStep 'installed-runtime' $true @{ dllsMatchPinnedArchive = $true; noticesMatchReference = $true; runtimeDirectory = 'encoder-runtime'; noticesLayout = 'flat' }
 
     $stage = 'installed-sidecar'
@@ -321,7 +379,18 @@ try {
         Assert-Smoke ((Get-Item -LiteralPath (Join-Path $smokeDir 'stream.h264')).Length -gt 0)
         Add-SmokeStep $stage $true @{ frames = $encoded.encoded; encoder = $encoded.encoder; secondsRequested = 3; pathIsolated = $true; installedSidecarSha256 = $actual['madscreen-encode-test.exe'] }
     } finally { $process.Dispose() }
+    $stage = 'interrupted-install'
+    $interrupt = Invoke-SmokeInterruptedInstall $Installer (Get-SmokeArguments $installRoot)
+    Assert-Smoke (@(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($Installer)) -ErrorAction SilentlyContinue).Count -eq 0) 'Instalador interrompido continua rodando'
+    Add-SmokeStep $stage $true $interrupt
+    $stage = 'retry-after-interruption'
+    Invoke-SmokeProcess $Installer (Get-SmokeArguments $installRoot)
+    Confirm-SmokeRegistration $newVersion $displayVersion
+    $retried = Compare-SmokePayload $expected (Get-SmokeTree $installRoot)
+    Assert-Smoke $retried.ok "Nova tentativa nao restaurou o payload: $($retried | ConvertTo-Json -Compress)"
+    Add-SmokeStep $stage $true @{ payloadMatchesNewInstaller = $true; userData = (Assert-SmokeUserDataKept $userData $userDataRoots 'retry') }
     $stage = 'uninstall'; Remove-SmokeInstallation; $attemptedInstall = $false
+    Add-SmokeStep 'user-data-after-uninstall' $true (Assert-SmokeUserDataKept $userData $userDataRoots 'silent-uninstall')
     $result.ok = $true
 } catch {
     Add-SmokeStep $stage $false (Get-SmokeErrorDetail $_ 'stage-failed' @($workRoot, $repoRoot, $env:USERPROFILE, $Installer, $PreviousInstaller))
@@ -332,6 +401,10 @@ try {
         } else {
             Add-SmokeStep 'cleanup' $false @{ code = 'owned-uninstaller-missing'; unsafeFallbackRefused = $true }; $result.ok = $false
         }
+    }
+    if ($seededUserData) {
+        # Remove somente os diretorios que o proprio smoke criou (verificados ausentes antes da semeadura).
+        foreach ($root in $userDataRoots) { if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force } }
     }
     if ($ready) { $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $workRoot 'result.json') -Encoding UTF8 }
     $result | ConvertTo-Json -Depth 12 -Compress | Write-Output

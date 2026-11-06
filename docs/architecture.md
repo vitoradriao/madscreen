@@ -1,3 +1,5 @@
+[English](architecture.en.md)
+
 # Arquitetura
 
 O madscreen tem três partes que falam entre si: o **app desktop** (Tauri 2 + WebView2) com um **engine** de captura

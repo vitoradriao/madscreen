@@ -84,7 +84,7 @@
 .member-row .action-menu { flex: none; }
 .member-row .action-menu > summary { border: 0; padding: 0; min-width: var(--control-h-sm); }
 .avatar { width: var(--avatar); height: var(--avatar); }
-.avatar img { filter: grayscale(1); }
+
 .avatar .presence.live { display: grid; place-items: center; width: 20px; height: 20px; right: -4px; bottom: -4px; color: var(--accent-fg); background: var(--accent); border: 3px solid var(--bg-sidebar); }
 .avatar .presence.live .icon { width: 11px; height: 11px; }
 .view { max-width: none; animation: none; }
