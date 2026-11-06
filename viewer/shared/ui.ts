@@ -403,7 +403,11 @@ export interface WatchOptions {
   onLeave?(): void;
   /** Prévia local: nunca assina áudio nem permite liberar o som. */
   preview?: boolean;
+  /** Espera após "ended" antes de sair sozinho; uma nova geração dentro dela reconecta. */
+  endedLeaveMs?: number;
 }
+
+const ENDED_LEAVE_MS = 10_000;
 
 const AUDIO_KEY = "ms.audio";
 
@@ -613,6 +617,20 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
   leave.addEventListener("click", () => { panel.stop(); options.onLeave?.(); });
   retry.addEventListener("click", () => session?.reconnect());
 
+  // Fim da live sai sozinho, mas espera a nova geração de uma troca de qualidade/fonte.
+  let endedTimer: ReturnType<typeof setTimeout> | undefined;
+  const cancelEndedLeave = (): void => { clearTimeout(endedTimer); endedTimer = undefined; };
+  const scheduleEndedLeave = (): void => {
+    cancelEndedLeave();
+    const current = session;
+    endedTimer = setTimeout(() => {
+      endedTimer = undefined;
+      if (session !== current || session === null) return;
+      panel.stop();
+      options.onLeave?.();
+    }, options.endedLeaveMs ?? ENDED_LEAVE_MS);
+  };
+
   const show = (state: WatchState, detail?: string): void => {
     guidance.replaceChildren();
     diagnostic.disabled = session === null;
@@ -663,6 +681,9 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
       setAudioPresent(false);
       session = new WatchSession(client, friend.username, video, {
         onState: (state, detail) => {
+          // "waiting" (hello sem live após reconectar o socket) não cancela a saída pendente.
+          if (state === "ended") scheduleEndedLeave();
+          else if (state !== "waiting") cancelEndedLeave();
           show(state, detail);
         },
         onAudio: setAudioPresent,
@@ -676,6 +697,7 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
       session.start();
     },
     stop() {
+      cancelEndedLeave();
       detachGeneration++;
       detached?.close(); detached = null;
       clearTimeout(diagnosticReset);
@@ -787,6 +809,7 @@ export function createWatchLayout(client: MadClient, options: WatchOptions & { o
       ...(options.popout ? { popout: options.popout } : {}),
       ...(options.toggleFullscreen ? { toggleFullscreen: options.toggleFullscreen } : {}),
       ...(options.preview !== undefined ? { preview: options.preview } : {}),
+      ...(options.endedLeaveMs !== undefined ? { endedLeaveMs: options.endedLeaveMs } : {}),
       keyboardActive: () => (document.fullscreenElement ? slots[index]!.contains(document.fullscreenElement) : selected === index) && (options.keyboardActive?.() ?? true),
       onLeave: () => {
         users[index] = null;
