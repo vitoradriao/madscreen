@@ -19,6 +19,7 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Gdi", "Win32_System_Performance",
     "Win32_Graphics_Direct3D_Fxc", "Wdk_System_SystemServices", "Win32_System_SystemInformation",
     "Win32_System_Threading", "Win32_Security",
+    "Win32_Devices_Display",
 ] }
 
 [lints.rust]

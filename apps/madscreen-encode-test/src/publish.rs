@@ -382,12 +382,19 @@ impl Live {
             u64::try_from(self.rate_origin.elapsed().as_millis()).unwrap_or(u64::MAX)
         });
         if let Some(ramp) = &self.rate_ramp {
-            let minimum_ms = if encoder.kind() == madscreen_encode::backend::BackendKind::Nvenc {
-                0
+            use madscreen_encode::{backend::BackendKind, rate::RatePacing};
+            let pacing = if encoder.rate_change_reopens() {
+                RatePacing::REOPEN
+            } else if encoder.kind() == BackendKind::Qsv {
+                // MFXVideoENCODE_Reset drena a fila e pode iniciar nova sequência [VERIFICAR].
+                RatePacing {
+                    minimum_ms: 1000,
+                    ..RatePacing::IN_SESSION
+                }
             } else {
-                1000
+                RatePacing::IN_SESSION
             };
-            self.wanted_bps = ramp.target_with_minimum_interval(rate_now_ms, minimum_ms);
+            self.wanted_bps = ramp.target_paced(rate_now_ms, pacing);
         }
         // O pedido fica guardado até o encoder aceitar (reconfigurar exige o pipeline vazio).
         if let Some(target) = self.wanted_bps {

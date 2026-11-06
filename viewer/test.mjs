@@ -34,3 +34,5 @@ await build({
   external: ["@tauri-apps/plugin-updater"],
 });
 await import(updateFailuresOutput.href);
+
+await import("./tests/chrome-launch.test.mjs");

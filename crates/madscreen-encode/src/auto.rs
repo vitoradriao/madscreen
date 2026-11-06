@@ -45,6 +45,13 @@ impl AutoEncoder {
     pub fn kind(&self) -> BackendKind {
         self.kind
     }
+    /// Troca de bitrate reabre a sessão (IDR e pausa): o chamador deve espaçar os ajustes.
+    pub fn rate_change_reopens(&self) -> bool {
+        match &self.backend {
+            Backend::Nvenc(_) => false,
+            Backend::Ffmpeg(e) => e.rate_change_reopens(),
+        }
+    }
     /// profile-level-id do SPS real (AMF/QuickSync/x264). NVENC usa o nível configurado.
     pub fn bitstream_profile_level_id(&self) -> Option<&str> {
         match &self.backend {
@@ -161,10 +168,9 @@ mod tests {
             }
             encoder.encode(&encoder.surface_at(slot)?, timing)?;
             if index == 2 {
-                assert!(matches!(
-                    encoder.reconfigure_rate(1_000_000, config.fps),
-                    Err(EncodeError::Busy)
-                ));
+                // x264 troca a taxa na sessão aberta: aceita com quadro em voo e sem IDR.
+                encoder.reconfigure_rate(1_000_000, config.fps)?;
+                assert!(!encoder.rate_change_reopens());
             }
             assert!(encoder.poll_into(&mut output)?);
             assert_eq!(output.index, index);

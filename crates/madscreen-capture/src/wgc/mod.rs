@@ -98,6 +98,8 @@ struct Metrics {
     counter: FpsCounter,
 }
 pub(crate) struct Shared {
+    display: Mutex<DisplaySession>,
+    display_warned: Arc<AtomicBool>,
     mailbox: Mutex<Mailbox>,
     metrics: Mutex<Metrics>,
     frames: AtomicU64,
@@ -118,9 +120,23 @@ pub(crate) struct Shared {
     border_generation: AtomicU64,
     notify: Arc<dyn Fn() + Send + Sync>,
 }
+#[derive(Default)]
+struct DisplaySession {
+    target: Option<CaptureTarget>,
+    monitor: Option<isize>,
+    info: crate::display::DisplayColorInfo,
+}
 impl Shared {
     fn new(notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self::with_display_warning(notify, Arc::new(AtomicBool::new(false)))
+    }
+    fn with_display_warning(
+        notify: Arc<dyn Fn() + Send + Sync>,
+        display_warned: Arc<AtomicBool>,
+    ) -> Self {
         Self {
+            display: Mutex::new(DisplaySession::default()),
+            display_warned,
             mailbox: Mutex::new(Mailbox {
                 frame: None,
                 size: SizeInt32::default(),
@@ -148,6 +164,38 @@ impl Shared {
             border_generation: AtomicU64::new(0),
             notify,
         }
+    }
+
+    fn set_display_target(&self, target: Option<CaptureTarget>) {
+        if let Ok(mut display) = self.display.lock() {
+            display.target = target;
+        }
+        self.refresh_display(true);
+    }
+
+    /// Called at lifecycle boundaries or statistics polling (window monitor changes), never per frame.
+    fn refresh_display(&self, force: bool) -> crate::display::DisplayColorInfo {
+        let Ok(mut display) = self.display.lock() else {
+            return crate::display::DisplayColorInfo::default();
+        };
+        let monitor = display.target.and_then(crate::display::monitor_for_target);
+        if force || display.monitor != monitor {
+            display.monitor = monitor;
+            display.info = monitor
+                .map(crate::display::monitor_color_info)
+                .unwrap_or_default();
+            if crate::display::first_hdr_warning(display.info, &self.display_warned) {
+                let color = display.info;
+                tracing::warn!(
+                    hdr_supported = ?color.hdr_supported,
+                    hdr_enabled = true,
+                    color_space = ?color.color_space,
+                    bits = ?color.bits,
+                    "HDR ativo na fonte; captura BGRA8/SDR sem conversão HDR qualificada"
+                );
+            }
+        }
+        display.info
     }
 
     fn wake(&self) {
@@ -202,7 +250,7 @@ impl WgcSource {
         target: CaptureTarget,
         options: CaptureOptions,
     ) -> Result<(), CaptureError> {
-        self.start_item(ffi::item_for_target(target)?, options)
+        self.start_item_for_target(ffi::item_for_target(target)?, options, Some(target))
     }
 
     pub fn start_item(
@@ -210,10 +258,24 @@ impl WgcSource {
         item: GraphicsCaptureItem,
         options: CaptureOptions,
     ) -> Result<(), CaptureError> {
+        // WinRT picker items have no reverse HMONITOR API. Never guess the primary display.
+        self.start_item_for_target(item, options, None)
+    }
+
+    fn start_item_for_target(
+        &mut self,
+        item: GraphicsCaptureItem,
+        options: CaptureOptions,
+        target: Option<CaptureTarget>,
+    ) -> Result<(), CaptureError> {
         let options = options.validate()?;
         self.stop();
         // Cada sessão possui seu estado: callbacks atrasados não atingem a próxima fonte.
-        self.shared = Arc::new(Shared::new(self.shared.notify.clone()));
+        self.shared = Arc::new(Shared::with_display_warning(
+            self.shared.notify.clone(),
+            self.shared.display_warned.clone(),
+        ));
+        self.shared.set_display_target(target);
         if !GraphicsCaptureSession::IsSupported()? {
             return Err(CaptureError::Unsupported);
         }
@@ -402,8 +464,14 @@ impl WgcSource {
     /// start_item troca Shared, impedindo callbacks antigos de repor a mailbox.
     pub fn refresh(&mut self, options: CaptureOptions) -> Result<(), CaptureError> {
         let item = self.item.clone().ok_or(CaptureError::Unsupported)?;
+        let target = self
+            .shared
+            .display
+            .lock()
+            .ok()
+            .and_then(|display| display.target);
         self.prior_counts = self.stats()?;
-        self.start_item(item, options)
+        self.start_item_for_target(item, options, target)
     }
     pub fn latest_frame(&self, redraw: bool) -> Result<Option<FrameLease<'_>>, CaptureError> {
         self.shared.latest_frame(redraw)
@@ -418,7 +486,7 @@ impl FrameSource for WgcSource {
     ) -> Result<(), CaptureError> {
         self.stop();
         self.gpu = GpuDevice::new(Some(target))?;
-        self.start_item(ffi::item_for_target(target)?, options)
+        self.start_on_device(target, options)
     }
     fn next_frame(&mut self, _timeout: Duration) -> Result<Option<Self::Frame<'_>>, CaptureError> {
         self.latest_frame(false)
@@ -521,6 +589,7 @@ fn arrived(
             buffers,
             size,
         )?;
+        shared.refresh_display(true);
         return Ok(());
     }
     let texture = ffi::surface_texture(&frame.0.Surface()?)?;
@@ -549,6 +618,7 @@ fn arrived(
 
 impl Shared {
     pub(crate) fn stats(&self, frequency: i64) -> Result<CaptureStats, CaptureError> {
+        let display = self.refresh_display(false);
         // A UI lê snapshots atômicos; nunca disputa o contador com FrameArrived.
         let now = ffi::now(frequency)?;
         let recent = system_time_duration(self.timestamp.load(Ordering::Acquire))
@@ -576,6 +646,7 @@ impl Shared {
             }
         };
         Ok(CaptureStats {
+            display,
             size: (
                 mailbox.size.Width.max(0) as u32,
                 mailbox.size.Height.max(0) as u32,

@@ -144,6 +144,10 @@ impl Api {
         )
     }
 }
+/// AMF (amfenc.c) não relê a taxa após abrir; MF/OpenH264 são candidatos de laboratório.
+fn supports_inplace_rate(kind: BackendKind) -> bool {
+    matches!(kind, BackendKind::X264 | BackendKind::Qsv)
+}
 fn unavailable(message: impl Into<String>) -> EncodeError {
     EncodeError::EncoderUnavailable(message.into())
 }
@@ -493,6 +497,10 @@ pub(crate) struct FfmpegEncoder {
     eos: bool,
     /// profile-level-id lido do SPS do quadro de prova; o driver pode subir o nível pedido.
     bitstream_profile_level_id: Option<String>,
+    /// Troca de bitrate na sessão aberta (x264/QuickSync); desliga após a primeira falha.
+    inplace_rate: bool,
+    /// QuickSync só valida o Reset no próximo `avcodec_send_frame`.
+    rate_unverified: bool,
 }
 // SAFETY: sessão exclusiva; DLLs/COM retidos, context D3D11 protegido; acesso sempre por &mut.
 unsafe impl Send for FfmpegEncoder {}
@@ -564,7 +572,13 @@ impl FfmpegEncoder {
             keyframe: true,
             eos: false,
             bitstream_profile_level_id,
+            inplace_rate: supports_inplace_rate(kind),
+            rate_unverified: false,
         })
+    }
+    /// Verdadeiro quando a próxima troca de bitrate reabre a sessão (IDR + pausa de centenas de ms).
+    pub fn rate_change_reopens(&self) -> bool {
+        !self.inplace_rate
     }
     pub fn bitstream_profile_level_id(&self) -> Option<&str> {
         self.bitstream_profile_level_id.as_deref()
@@ -652,7 +666,31 @@ impl FfmpegEncoder {
         if status == -11 {
             return Err(EncodeError::Busy);
         }
+        if status < 0 && self.rate_unverified {
+            // O driver recusou o Reset da taxa: volta à reabertura, já com a taxa nova, e
+            // devolve Busy para o chamador reenviar este mesmo slot na sessão nova.
+            let error = self.session.api.check(status, "avcodec_send_frame").err();
+            tracing::warn!(
+                encoder = self.kind.name(),
+                ?error,
+                "Troca de bitrate na sessão aberta falhou; usando reabertura do encoder"
+            );
+            self.inplace_rate = false;
+            self.rate_unverified = false;
+            if !self.pending.is_empty() {
+                return Err(EncodeError::SessionFailed);
+            }
+            self.session = Session::new(
+                self.session.api.clone(),
+                &self.config,
+                self.kind,
+                self.slots.len(),
+            )?;
+            self.keyframe = true;
+            return Err(EncodeError::Busy);
+        }
         self.session.api.check(status, "avcodec_send_frame")?;
+        self.rate_unverified = false;
         self.keyframe = false;
         timing.qpc_encode_return = qpc()?;
         self.pending.push_back(Pending {
@@ -730,6 +768,23 @@ impl FfmpegEncoder {
         config.validate()?;
         config.clamp_h264_bitrate();
         if config.bitrate_bps == self.config.bitrate_bps && fps == self.config.fps {
+            return Ok(());
+        }
+        if self.inplace_rate && fps == self.config.fps {
+            // QuickSync: sem quadros em voo, a recuperação de um Reset recusado pode reabrir a
+            // sessão sem perder saída (o próximo send é o primeiro após a troca).
+            if self.kind == BackendKind::Qsv && !self.pending.is_empty() {
+                return Err(EncodeError::Busy);
+            }
+            // libx264.c reconfig_encoder() e qsvenc.c update_bitrate() (FFmpeg 760d10603e) leem
+            // bit_rate/rc_max_rate/rc_buffer_size a cada quadro: sem nova sessão e sem IDR forçado.
+            let vbv = config.vbv_bits()?.to_string();
+            let bitrate = config.bitrate_bps.to_string();
+            for (key, value) in [("b", &bitrate), ("maxrate", &bitrate), ("bufsize", &vbv)] {
+                self.session.api.set(self.session.context, key, value)?;
+            }
+            self.rate_unverified = self.kind == BackendKind::Qsv;
+            self.config = config;
             return Ok(());
         }
         if !self.pending.is_empty() {
@@ -1161,6 +1216,78 @@ mod tests {
         };
         session = Session::new(api, &next, kind, 3)?;
         session.smoke(&next)?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requer runtime FFmpeg em MADSCREEN_ENCODER_RUNTIME; não exige GPU"]
+    fn runtime_x264_rate_changes_inside_open_session() -> Result<()> {
+        let api = Api::load()?;
+        let mut config = EncoderConfig {
+            width: 640,
+            height: 360,
+            fps: FrameRate::new(30, 1)?,
+            bitrate_bps: 6_000_000,
+            h264_level: Some(31),
+            ..Default::default()
+        };
+        let session = Session::new(api.clone(), &config, BackendKind::X264, 1)?;
+        let frame = session.frames[0];
+        let mut seed = 0x9e37_79b9_u32;
+        let mut encode = |index: i64| -> Result<(usize, bool)> {
+            // SAFETY: frame/contexto/packet exclusivos da Session; planos NV12 alocados nela.
+            unsafe {
+                for (plane, rows) in [(0, config.height), (1, config.height / 2)] {
+                    for row in 0..rows as usize {
+                        let line =
+                            (*frame).data[plane].add(row * (*frame).linesize[plane] as usize);
+                        for column in 0..config.width as usize {
+                            seed ^= seed << 13;
+                            seed ^= seed >> 17;
+                            seed ^= seed << 5;
+                            *line.add(column) = seed as u8;
+                        }
+                    }
+                }
+                (*frame).pts = index;
+                (*frame).pict_type = i32::from(index == 0);
+                api.check((api.send)(session.context, frame), "send")?;
+                api.check((api.receive)(session.context, session.packet), "receive")?;
+                let packet = &*session.packet;
+                let info = crate::bitstream::inspect_annex_b(
+                    VideoCodec::H264,
+                    std::slice::from_raw_parts(packet.data, packet.size as usize),
+                );
+                let size = packet.size as usize;
+                (api.packet_unref)(session.packet);
+                Ok((size, info.key))
+            }
+        };
+        let high: usize = (0..30)
+            .map(|i| encode(i).map(|(s, _)| s))
+            .sum::<Result<_>>()?;
+        config.bitrate_bps = 500_000;
+        let vbv = config.vbv_bits()?.to_string();
+        for (key, value) in [
+            ("b", "500000"),
+            ("maxrate", "500000"),
+            ("bufsize", vbv.as_str()),
+        ] {
+            api.set(session.context, key, value)?;
+        }
+        let mut low = 0;
+        for index in 30..90 {
+            let (size, key) = encode(index)?;
+            assert!(
+                !key,
+                "troca de taxa na sessão não pode gerar IDR (quadro {index})"
+            );
+            if index >= 60 {
+                low += size;
+            }
+        }
+        // 30 quadros a 6 Mbps vs. 30 quadros após assentar em 0,5 Mbps.
+        assert!(low * 4 < high, "taxa não aplicada: alto={high} baixo={low}");
         Ok(())
     }
 }

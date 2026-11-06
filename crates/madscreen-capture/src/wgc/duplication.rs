@@ -4,7 +4,10 @@ mod ffi;
 use super::{FrameLease, GpuDevice, Mailbox, Shared};
 use crate::{CaptureError, CaptureOptions, CaptureStats, system_time_duration};
 use std::{
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -29,9 +32,25 @@ impl DesktopSource {
         options: CaptureOptions,
         notify: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, CaptureError> {
+        Self::start_with_warning(
+            gpu,
+            monitor,
+            options,
+            notify,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+    fn start_with_warning(
+        gpu: GpuDevice,
+        monitor: isize,
+        options: CaptureOptions,
+        notify: Arc<dyn Fn() + Send + Sync>,
+        warning: Arc<AtomicBool>,
+    ) -> Result<Self, CaptureError> {
         let options = options.validate()?;
         let session = ffi::Session::open(&gpu, monitor)?;
-        let shared = Arc::new(Shared::new(notify));
+        let shared = Arc::new(Shared::with_display_warning(notify, warning));
+        shared.set_display_target(Some(crate::CaptureTarget::Monitor(monitor)));
         let size = session.size();
         *shared
             .mailbox
@@ -76,7 +95,13 @@ impl DesktopSource {
         let gpu = self.gpu.clone();
         let notify = self.shared.notify.clone();
         self.stop();
-        let mut replacement = Self::start(gpu, self.monitor, self.options, notify)?;
+        let mut replacement = Self::start_with_warning(
+            gpu,
+            self.monitor,
+            self.options,
+            notify,
+            self.shared.display_warned.clone(),
+        )?;
         replacement.prior_counts = counts;
         *self = replacement;
         Ok(())
@@ -140,6 +165,7 @@ fn run(
         if session.is_none() {
             match ffi::Session::open(gpu, monitor) {
                 Ok(restored) => {
+                    shared.refresh_display(true);
                     session = Some(restored);
                     compositor.reset();
                     tracing::info!("Duplicação DXGI recriada; aguardando primeiro quadro");

@@ -1,7 +1,7 @@
 import { readCss } from '../tools/ui/read-css.mjs';
 import { build } from "esbuild";
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+import { launchChrome } from "./tests/chrome-launch.mjs";
 import { readFile,writeFile,mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -12,15 +12,10 @@ const bundle=await build({entryPoints:[fileURLToPath(new URL("tests/browser-fixt
 let css=await readCss(new URL("shared/tokens.css",import.meta.url));
 const server=createServer((req,res)=>{res.setHeader("Content-Type",req.url==="/qa.js"?"text/javascript":"text/html");res.end(req.url==="/qa.js"?bundle.outputFiles[0].text:`<!doctype html><meta charset="utf-8"><style>${css}</style><body style="padding:24px"><script type="module" src="/qa.js"></script></body>`);});
 await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
-const profile=path.join(output,`chrome-${Date.now()}`);await mkdir(profile,{recursive:true});
-const child=spawn(process.env.CHROME_PATH??"C:/Program Files/Google/Chrome/Application/chrome.exe",["--headless=new","--no-first-run","--disable-background-networking","--autoplay-policy=no-user-gesture-required","--window-size=1440,1000","--remote-debugging-port=0","--no-sandbox","--disable-gpu","--enable-logging=stderr",`--user-data-dir=${profile}`,"about:blank"],{stdio:["ignore","ignore","pipe"],windowsHide:true});
-let chromeLog="";child.stderr.on("data",chunk=>{if(chromeLog.length<4000)chromeLog+=chunk;});
-let socket;
+let socket,chrome;
 try {
-  let port;
-  for(let i=0;i<300&&child.exitCode===null;i++){try{port=(await readFile(path.join(profile,"DevToolsActivePort"),"utf8")).split("\n")[0];break;}catch{await new Promise(resolve=>setTimeout(resolve,100));}}
-  if(!port)throw Error(`Chrome de teste não iniciou (código de saída: ${child.exitCode ?? "ainda em execução"}); configure CHROME_PATH.
-${chromeLog.slice(0,2000)}`);
+  chrome=await launchChrome({profileRoot:output,args:["--headless=new","--no-first-run","--disable-background-networking","--autoplay-policy=no-user-gesture-required","--window-size=1440,1000","--no-sandbox","--disable-gpu","--enable-logging=stderr"]});
+  const port=chrome.port;
   const tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   socket=new WebSocket(tabs.find(tab=>tab.type==="page"&&tab.url==="about:blank").webSocketDebuggerUrl);
   await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject;});
@@ -349,4 +344,4 @@ ${chromeLog.slice(0,2000)}`);
   }
   await writeFile(path.join(output,"result.json"),JSON.stringify(result,null,2));
   process.stdout.write(JSON.stringify(result,null,2)+"\n");process.exitCode=result.ok&&errors.length===0?0:1;
-} finally {socket?.close();child.kill();server.closeAllConnections();server.close();}
+} finally {socket?.close();chrome?.close();server.closeAllConnections();server.close();}

@@ -1,5 +1,6 @@
 //! Tipos portáveis e captura oficial WGC/DXGI com mailbox na GPU.
 use std::time::Duration;
+pub mod display;
 #[cfg(any(windows, test))]
 mod pointer;
 
@@ -92,6 +93,8 @@ pub enum CaptureError {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CaptureStats {
+    /// Estado consultado fora do caminho por frame; None significa desconhecido.
+    pub display: display::DisplayColorInfo,
     pub size: (u32, u32),
     pub capture_fps: f64,
     pub frames: u64,

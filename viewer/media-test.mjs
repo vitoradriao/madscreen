@@ -2,6 +2,7 @@ import { readCss } from '../tools/ui/read-css.mjs';
 // Validação opt-in contra o SFU real; requer Worker local e sessões de teste privadas.
 import { build } from 'esbuild';
 import { spawn } from 'node:child_process';
+import { launchChrome } from './tests/chrome-launch.mjs';
 import { createServer } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -50,9 +51,8 @@ let socket,browser;
 try{
  console.log('Conectando publicador 1 ao Worker/LiveKit...');await publish('host');
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
- const profile=path.join(output,`chrome-${Date.now()}`);await mkdir(profile,{recursive:true});
- browser=spawn(process.env.CHROME_PATH??'C:/Program Files/Google/Chrome/Application/chrome.exe',['--headless=new','--no-first-run','--disable-background-networking','--autoplay-policy=no-user-gesture-required','--window-size=1440,1000','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{stdio:'ignore',windowsHide:true});
- let port;for(let i=0;i<100;i++){try{port=(await readFile(path.join(profile,'DevToolsActivePort'),'utf8')).split('\n')[0];break;}catch{await wait(100);}}if(!port)throw Error('Chrome não iniciou.');
+ browser=await launchChrome({profileRoot:output,captureStderr:false,args:['--headless=new','--no-first-run','--disable-background-networking','--autoplay-policy=no-user-gesture-required','--window-size=1440,1000']});
+ const port=browser.port;
  const tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();socket=new WebSocket(tabs.find(t=>t.type==='page').webSocketDebuggerUrl);await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject;});
  let sequence=0;const pending=new Map();socket.onmessage=e=>{const v=JSON.parse(e.data);if(v.id){const p=pending.get(v.id);if(p){pending.delete(v.id);v.error?p.reject(v.error):p.resolve(v.result);}}};
  const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++sequence;pending.set(id,{resolve,reject});socket.send(JSON.stringify({id,method,params}));});
@@ -79,7 +79,7 @@ try{
  console.log(JSON.stringify({ok,videos:last.videos,late:last.late,stereo,own,stopPreservesOther:stopped.videos[1].time>last.videos[1].time,errors:last.errors},null,2));
  await evaluate('window.ownSession.stop();window.lateSession.stop();window.layout.dispose()');await wait(1000);process.exitCode=ok?0:1;
 }finally{
- socket?.close();browser?.kill();server.closeAllConnections();server.close();
+ socket?.close();browser?.close();server.closeAllConnections();server.close();
  for(const key of ['host','second']){
   try{
    const headers={Authorization:`Bearer ${sessions[key].token}`,'Content-Type':'application/json'};
