@@ -38,12 +38,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build da prévia para download
         run: cargo build --release -p madscreen-preview
+      # Artefatos contam na cota de 500 MB da conta (repo privado): binarios ficam 1 dia e falha de
+      # upload (cota) nao reprova o CI, que deve refletir so o codigo.
       - name: Executável da prévia Windows x64
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: madscreen-preview-windows-x64
           path: target/release/madscreen-preview.exe
-          retention-days: 14
+          retention-days: 1
           if-no-files-found: error
       - name: Build do teste de encoders para download
         run: cargo build --release -p madscreen-encode-test
@@ -51,12 +54,13 @@ jobs:
         run: .\target\release\madscreen-encode-test.exe --probe
       - name: Executável e runtime de encoders Windows x64
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: madscreen-encode-test-windows-x64
           path: |
             target/release/madscreen-encode-test.exe
             target/release/encoder-runtime/
-          retention-days: 14
+          retention-days: 1
           if-no-files-found: error
       # Runner hospedado não tem GPU. Benchmark real só em runner self-hosted/manual.
       # Capturas curtas e sintéticas verificam o fluxo, não o aceite do M0.3.

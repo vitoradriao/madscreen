@@ -367,6 +367,36 @@ impl WgcSource {
         Ok(())
     }
 
+    /// Change capture cadence without recreating the pool or capture item.
+    pub fn set_target_fps(&self, fps: Option<u32>) -> bool {
+        let Some(session) = &self.session else {
+            return false;
+        };
+        let interval = TimeSpan {
+            Duration: crate::min_update_interval_100ns(fps),
+        };
+        match session.SetMinUpdateInterval(interval) {
+            Ok(()) => {
+                self.shared
+                    .min_interval
+                    .store(interval.Duration, Ordering::Release);
+                tracing::info!(
+                    ?fps,
+                    interval_us = interval.Duration / 10,
+                    "Cadência WGC ajustada"
+                );
+                true
+            }
+            Err(error) => {
+                static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+                WARN_ONCE.call_once(|| {
+                    tracing::warn!(%error, "MinUpdateInterval indisponível; usando a grade de captura do runner");
+                });
+                false
+            }
+        }
+    }
+
     pub fn set_border(&self, required: bool) {
         let Some(session) = &self.session else {
             return;

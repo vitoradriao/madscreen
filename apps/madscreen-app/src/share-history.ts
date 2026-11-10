@@ -50,6 +50,20 @@ export function validateWindow(source:PickedSource,windows:WindowSource[]):boole
   return windows.some(window=>window.hwnd===source.hwnd&&window.instance_id===source.instanceId&&window.app_id===source.appId
     && (source.selectionId===undefined||window.selection_id===source.selectionId));
 }
+const AMD_VENDOR_ID=0x1002;
+/**
+ * FPS inicial da tela de compartilhamento. Sem NVENC e fora da AMD o encoder previsto é
+ * QuickSync ou x264 (notebook/PC fraco, readback por quadro): 30 FPS corta esse custo pela metade
+ * e dá o dobro de bits por quadro para texto. AMD segue em 60: placas dedicadas fazem 1080p60 no
+ * AMF (APU fraca fica para o ajuste por carga). Vendor ou NVENC desconhecidos (engine antigo)
+ * mantêm 60. Escolha explícita do usuário e um 30 salvo sempre valem.
+ */
+export function defaultFps(settings:{quality_fps:number;quality_fps_chosen?:boolean},gpu:{nvenc_available?:boolean|null;gpu_vendor_id?:number|null}|null):30|60 {
+  if(settings.quality_fps===30)return 30;
+  if(settings.quality_fps_chosen)return 60;
+  const vendor=gpu?.gpu_vendor_id;
+  return gpu?.nvenc_available===false&&typeof vendor==="number"&&vendor!==AMD_VENDOR_ID?30:60;
+}
 export function historyKey(userId:string):string { return "ms.share.apps."+encodeURIComponent(userId); }
 
 /** Só uma sessão confirmada pode atualizar o perfil; nunca uma tentativa ou rollback de outra fonte. */

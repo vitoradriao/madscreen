@@ -228,8 +228,8 @@ e acrescenta `-p1`…`-p4` aos nomes de bitstream/CSV. JSON contém um array dos
 e executa shader/NV12, VP/NV12 e shader de escala/BGRA em sequência. Acrescenta
 `-shader`, `-vp`, `-bgra` aos arquivos; JSON mantém todos os perfis, incluindo modo
 efetivo (o shader NV12 ainda pode cair em VP). A tabela inclui `convert_gpu`,
-`queue_wait` e total p95. `--multipass quarter-res` habilita a alternativa de duas passagens em 1/4 da resolução;
-padrão `disabled`. Intra-refresh: `--intra-refresh-period 144 --intra-refresh-count 8`
+`queue_wait` e total p95. `--multipass` controla as duas passagens com a primeira em 1/4 da resolução;
+padrão `quarter-res` desde 7/nov/2026 (`docs/bench/idr-convergencia-2026-11-07.md`), retorno com `--multipass disabled`. Intra-refresh: `--intra-refresh-period 144 --intra-refresh-count 8`
 (exige suporte do codec; `0 < count < period`).
 
 Ctrl+C termina o loop, para WGC, envia EOS, libera os recursos NVENC e salva JSON/CSV.
@@ -367,7 +367,7 @@ Parâmetros sobre a **cópia do preset retornado pelo driver**, nunca sobre um
 | GOP / idrPeriod | infinito |
 | frameIntervalP / zeroReorderDelay | 1 / 1 |
 | Lookahead / external lookahead / AQ espacial e temporal | desativados |
-| multiPass / lowDelayKeyFrameScale | disabled / 1 |
+| multiPass / lowDelayKeyFrameScale | quarter resolution (CLI/app) / 1 |
 | Perfis | H.264 High; HEVC Main 8-bit; AV1 Main 8-bit, 4:2:0 |
 | Sequence headers | SPS/PPS (HEVC também VPS) repetidos em cada IDR; AV1 repeatSeqHdr |
 | Cores | BT.709 limited explicitamente sinalizado no bitstream |

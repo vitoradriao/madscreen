@@ -48,7 +48,9 @@ export async function checkMiniPlayer(check: (ok: unknown, label: string) => voi
     try { await openMiniPlayerWithHost(stage,"Outra",host); } catch { duplicateRejected = true; }
     check(duplicateRejected, "Segundo mini-player é recusado sem criar assinatura adicional");
     const top=iframe.contentDocument!.querySelector<HTMLButtonElement>('[aria-label="Sempre no topo"]')!;
+    check(top.textContent==='Fixado', "Mini-player mostra o estado de fixação antes da interação");
     top.click(); await flush();
+    check(top.textContent==='Fixar no topo', "Mini-player confirma visualmente que deixou de ficar fixado");
     check(top.getAttribute("aria-pressed")==="false" && calls.at(-1)?.args.action==="top", "Sempre no topo só muda estado após confirmação nativa");
     const hide=[...iframe.contentDocument!.querySelectorAll("button")].find(b=>b.textContent==="Controles")!;
     hide.click();

@@ -107,11 +107,13 @@ fn start_share_cloudflare(
     audio: Option<AudioRequest>,
     channel_id: Option<String>,
     selection_id: Option<u64>,
+    fps_chosen: Option<bool>,
 ) -> Result<(), String> {
     window_guard::validate(&app, &source, selection_id)?;
     let mut saved = settings::load(&app);
     saved.quality_height = height;
     saved.quality_fps = fps;
+    saved.quality_fps_chosen |= fps_chosen == Some(true);
     let _ = settings::save(&app, &saved);
     engine.start(
         &app,
@@ -133,6 +135,7 @@ fn start_share_cloudflare(
 
 /// Aplica qualidade/fonte no canal da sessão atual; cancelar ou sair impede reinício tardio.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn change_share(
     app: AppHandle,
     engine: State<'_, Engine>,
@@ -141,6 +144,7 @@ async fn change_share(
     source: Option<SourceSpec>,
     audio: Option<AudioRequest>,
     selection_id: Option<u64>,
+    fps_chosen: Option<bool>,
 ) -> Result<(), String> {
     window_guard::validate(&app, &source, selection_id)?;
     let engine = engine.inner().clone();
@@ -159,6 +163,7 @@ async fn change_share(
         let mut saved = settings::load(&app);
         saved.quality_height = height;
         saved.quality_fps = fps;
+        saved.quality_fps_chosen |= fps_chosen == Some(true);
         let _ = settings::save(&app, &saved);
     }
     Ok(())

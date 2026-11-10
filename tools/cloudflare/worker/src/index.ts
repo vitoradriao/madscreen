@@ -195,9 +195,10 @@ async function apiRoutes(request: Request, env: Env, url: URL): Promise<Response
   if (path === "/api/me") {
     if (method === "GET") {
       const user = await hub(env).me(uid);
+      const recoveryKey = await hub(env).hasRecoveryKey(uid);
       const refresh = Math.floor(Date.now() / 1000) - principal.iat > 30 * 86400
         ? await signSession(uid, env.SESSION_SECRET, Math.floor(Date.now() / 1000), principal.sessionId) : null;
-      return json({ user, ...(refresh ? { token: refresh.token, exp: refresh.exp } : {}) });
+      return json({ user, account: { recoveryKey }, ...(refresh ? { token: refresh.token, exp: refresh.exp } : {}) });
     }
     if (method === "PATCH") {
       const body = await readJson(request);
@@ -211,6 +212,9 @@ async function apiRoutes(request: Request, env: Env, url: URL): Promise<Response
         : env.STREAM.get(env.STREAM.idFromName(owner)).revokeViewer(uid)));
       return json({ ok: true });
     }
+  }
+  if (method === "POST" && path === "/api/me/recovery-key") {
+    return json({ recoveryKey: await hub(env).rotateRecoveryKey(uid) });
   }
   const changeDirectory = async (action: string, target: string, value?: unknown, memberId?: string): Promise<Response> => {
     const result = await hub(env).changeDirectory(uid, action, target, value, memberId);

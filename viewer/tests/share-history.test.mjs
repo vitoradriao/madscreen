@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseHistory, preferenceFor, confirmedPreferenceFor, rememberApp, sourceForApp, validateWindow } from '../../apps/madscreen-app/src/share-history.ts';
+import { defaultFps, parseHistory, preferenceFor, confirmedPreferenceFor, rememberApp, sourceForApp, validateWindow } from '../../apps/madscreen-app/src/share-history.ts';
 const app='a'.repeat(64), instance='b'.repeat(64);
 const pref={appId:app,processName:'game.exe',height:1080,fps:60,audio:'window'};
 const window={hwnd:123,title:'Título privado',process:'game.exe',app_id:app,instance_id:instance,width:1920,height:1080};
@@ -42,4 +42,15 @@ test('preferências de som mantêm modo explícito sem persistir PIDs',()=>{
   assert.equal(stored.audio,'custom');assert.equal(JSON.stringify(stored).includes('1234'),false);
   assert.deepEqual(sourceForApp({...stored,audio:'none'},[window]).audio,{system:false,follow_window:false,apps:[]});
   assert.equal(sourceForApp({...stored,audio:'system'},[window]).audio.system,true);
+});
+test('30 FPS só para QuickSync/CPU sem NVENC; AMD, NVENC e engine antigo seguem em 60',()=>{
+  const intel={nvenc_available:false,gpu_vendor_id:0x8086};
+  assert.equal(defaultFps({quality_fps:60},intel),30);
+  assert.equal(defaultFps({quality_fps:60},{nvenc_available:false,gpu_vendor_id:0x1414}),30,'adaptador básico: x264');
+  assert.equal(defaultFps({quality_fps:60},{nvenc_available:false,gpu_vendor_id:0x1002}),60,'AMD dedicada faz 60 no AMF');
+  assert.equal(defaultFps({quality_fps:60},{nvenc_available:true,gpu_vendor_id:0x10de}),60);
+  assert.equal(defaultFps({quality_fps:60,quality_fps_chosen:true},intel),60);
+  assert.equal(defaultFps({quality_fps:30},{nvenc_available:true,gpu_vendor_id:0x10de}),30);
+  for(const unknown of [null,{nvenc_available:false},{nvenc_available:false,gpu_vendor_id:null},{gpu_vendor_id:0x8086}])
+    assert.equal(defaultFps({quality_fps:60},unknown),60);
 });

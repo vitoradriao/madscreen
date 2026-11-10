@@ -4,6 +4,8 @@ import { MadClient, ApiFailure } from "../shared/client";
 import { createSfuAdminPanel } from "../shared/sfu-admin";
 import { createServers } from "../shared/servers-ui";
 import { createSettingsView } from "../../apps/madscreen-app/src/views/settings";
+import { createWatchView } from "../../apps/madscreen-app/src/views/watch";
+import { client as appClient } from "../../apps/madscreen-app/src/session";
 import { createUpdateController } from "../../apps/madscreen-app/src/updates";
 import { checkShareResolution } from "./share-resolution-fixture";
 import { checkShareChanges } from "./share-change-fixture";
@@ -71,9 +73,14 @@ try {
   const login = createLogin(loginClient, {openUrl(){},onLoggedIn(){},invite:"OLD"});
   document.body.append(login); await flush();
   const inviteInput = login.querySelector<HTMLInputElement>('input[autocomplete="off"]')!;
-  inviteInput.value = "NEW"; inviteInput.dispatchEvent(new Event("input")); inviteInput.dispatchEvent(new Event("change")); await flush();
+  inviteInput.value = "NEW"; inviteInput.dispatchEvent(new Event("input")); await new Promise(resolve=>setTimeout(resolve,450)); await flush();
   previewResolve({inviter:{displayName:"Antigo"},server:{name:"Destino antigo"}}); await flush();
-  check(login.textContent?.includes("Servidor novo · Jogos") && !login.textContent?.includes("Destino antigo"), "Destino do convite ignora respostas antigas após editar o campo");
+  check(login.textContent?.includes("Servidor novo · # Jogos") && !login.textContent?.includes("Destino antigo"), "Destino do convite aparece ao digitar e ignora respostas antigas");
+  const fallbackDetails = login.querySelector<HTMLDetailsElement>("details")!;
+  fallbackDetails.open = true; await flush();
+  const order = Array.from(login.querySelectorAll<HTMLElement>("summary, button, input")).filter(node => !node.closest("[hidden]")).map(node => node.textContent?.trim() || node.getAttribute("placeholder"));
+  check(order.indexOf("Entrar sem Discord") < order.indexOf("Continuar com Discord") && order.indexOf("Criar conta") < order.indexOf("Continuar com Discord"), "Com a alternativa aberta, a ordem do DOM segue a ordem visual");
+  fallbackDetails.open = false; await flush();
   check(!login.querySelector("details")!.open && Array.from(login.querySelectorAll("button")).find(b=>b.textContent?.includes("Google"))!.hidden, "Discord principal, contingência expansível e provedor desabilitado oculto");
   (window as any).loginUiHtml=login.outerHTML;
   login.remove();
@@ -89,6 +96,29 @@ try {
   await checkShareFlow(check, flush);
   await checkShareHistory(check, flush);
   await checkMiniPlayer(check, flush);
+  const appSession=appClient.session,appRequest=appClient.request,appIce=appClient.iceServers;
+  appClient.session=client.session;appClient.request=client.request.bind(client);appClient.iceServers=client.iceServers.bind(client);
+  const watchView=createWatchView(()=>watchView.show?.());
+  document.body.append(watchView.root,watchView.compact);
+  try {
+    watchView.show?.();watchView.watch({username:'compact-test',displayName:'Nome do compacto'});await flush();
+    const video=watchView.panel.root.querySelector('video')!,stream=video.srcObject,roomCount=Room.instances.length;
+    watchView.hide?.();
+    [...watchView.compact.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent==='Recolher player')!.click();
+    check(watchView.compact.classList.contains('collapsed') && Room.instances.length===roomCount && video.srcObject===stream,
+      'Recolher player preserva o vídeo e a conexão sem encerrar a reprodução');
+    [...watchView.compact.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent==='Voltar para Assistir')!.click();
+    check(watchView.compact.hidden && watchView.root.contains(video),'Retornar do compacto recolhido restaura o mesmo player');
+  } finally { watchView.dispose?.();watchView.root.remove();watchView.compact.remove();appClient.session=appSession;appClient.request=appRequest;appClient.iceServers=appIce; }
+  const failedMini=createWatchLayout(client,{popout:async()=>{throw Error('Janela de teste indisponível');}});
+  document.body.append(failedMini.root);
+  try {
+    failedMini.watch({username:'mini-test',displayName:'Pessoa do teste'});await flush();
+    [...failedMini.root.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent==='Mini-player')!.click();await flush();
+    check(!failedMini.root.querySelector<HTMLElement>('.watch-action-error')!.hidden
+      && failedMini.root.querySelector('.watch-action-error')!.textContent?.includes('Tente novamente'),
+      'Falha de mini-player é visível sobre o vídeo sem exigir abrir ajuda');
+  } finally { failedMini.dispose();failedMini.root.remove(); }
   const previousInternals=(window as any).__TAURI_INTERNALS__;
   const decodeCalls:any[]=[];let decodeFail=false;
   (window as any).__TAURI_INTERNALS__={invoke:async(command:string,args:any)=>{
@@ -100,6 +130,7 @@ try {
   const decodeUpdates=createUpdateController({check:async()=>null,prepareInstall:async()=>{throw Error('Não deve instalar');}});
   const decodeSettings=createSettingsView(async()=>{},decodeUpdates);
   document.body.append(decodeSettings.root);await flush();
+  [...decodeSettings.root.querySelectorAll<HTMLButtonElement>('.settings-nav button')].find(button=>button.textContent==='Reprodução de vídeo')!.click();
   const decodeInput=Array.from(decodeSettings.root.querySelectorAll("label")).find(label=>label.textContent?.includes("Modo de compatibilidade"))!.querySelector<HTMLInputElement>("input")!;
   check(!decodeInput.disabled&&!decodeInput.checked,"Modo de compatibilidade respeita preferência anterior e mantém hardware por padrão");
   decodeInput.checked=true;decodeInput.dispatchEvent(new Event('change'));await flush();
@@ -119,6 +150,13 @@ try {
   });
   const settings=createSettingsView(async()=>{},settingsUpdates);
   document.body.append(settings.root);await settingsUpdates.check();await flush();
+  const settingsSection=(title:string)=>[...settings.root.querySelectorAll<HTMLButtonElement>('.settings-nav button')].find(button=>button.textContent===title)!;
+  check(settings.root.querySelectorAll('.settings-panel:not([hidden])').length===1,"Conta apresenta uma única seção por vez");
+  settingsSection('Aparência').click();
+  check(settings.root.querySelector('.settings-panel:not([hidden])')?.getAttribute('aria-label')==='Aparência'
+    && document.activeElement?.textContent==='Aparência',"Navegação revela a seção escolhida e leva foco ao título");
+  settings.hide?.();settings.show?.();
+  check(settingsSection('Aparência').getAttribute('aria-current')==='true',"Voltar à Conta preserva a seção escolhida");
   const previousTheme = localStorage.getItem('ms.theme');
   const themeButton = (label: string) => [...settings.root.querySelectorAll<HTMLButtonElement>('[aria-label="Tema da interface"] button')].find(button => button.textContent === label)!;
   const videoSurface = document.createElement('div'); videoSurface.className = 'stage'; document.body.append(videoSurface);
@@ -138,7 +176,8 @@ try {
   if (previousTheme === null) localStorage.removeItem('ms.theme'); else localStorage.setItem('ms.theme', previousTheme);
   check(updateCalls.join(",")==="check","Consulta automatica de atualizacao nao baixa nem instala");
 
-  check(updateCalls.join(',')==='check'&&!settings.root.querySelector('.settings-links')&&!!settings.root.querySelector('.settings-sections'),"Conta exibe seções diretamente sem sumário e preserva estado do updater");
+  check(updateCalls.join(',')==='check'&&!settings.root.querySelector('.settings-links')&&!!settings.root.querySelector('.settings-sections'),"Navegação da Conta preserva estado do updater");
+  settingsSection('Atualizações').click();
   const installUpdate=Array.from(settings.root.querySelectorAll<HTMLButtonElement>("button")).find(b=>b.textContent==="Instalar e reiniciar")!;
   installUpdate.click();await flush();
   check(updateCalls.join(",")==="check,download"&&settings.root.textContent!.includes("Não foi possível instalar"),"Falha no download nao interrompe o engine nem instala pacote");
@@ -181,7 +220,7 @@ try {
     return structuredClone(adminStatus) as never;
   }});
   document.body.append(admin.root);admin.show();await flush();
-  check(!admin.root.hidden&&admin.root.textContent!.includes("900.00 GB")&&admin.root.textContent!.includes("limite de uso estimado"),"Admin mostra estimativa mensal, saúde e aviso de troca");
+  check(!admin.root.hidden&&admin.root.textContent!.includes("900,00 GB")&&admin.root.textContent!.includes("limite de uso estimado"),"Admin mostra estimativa mensal, saúde e aviso de troca");
   check([...admin.root.querySelectorAll('.probe')].some(probe => probe.textContent?.includes('Controle') && probe.querySelector('.state')?.textContent === 'Saudável') && admin.root.textContent!.includes("Não foi possível determinar a saúde do vídeo"),"Admin distingue saúde de controle de mídia desconhecida");
   check(admin.root.textContent!.includes("Troca por consumo desativada"),"Admin não anuncia troca por estimativa sem calibração confirmada");
   const adminMode=admin.root.querySelector("select")!;
@@ -234,18 +273,22 @@ try {
   memberToggle.click();
   check(!ownerDirectory.root.querySelector<HTMLElement>('.server-members')!.hidden,"Botão de membros restaura o painel lateral");
   check(!ownerDirectory.root.querySelector('.server-navigation .server-join')&&!!ownerDirectory.root.querySelector('.server-add-menu .server-join'),"Entrar por convite fica no menu global de adicionar servidor");
-  ownerClient.createInvite=async()=>({code:"TEST-CODE",link:"https://example.invalid/i/TEST-CODE",expiresAt:Date.now()+60000,maxUses:10});
+  ownerClient.createInvite=async()=>({code:"TEST-CODE",link:"https://example.invalid/i/TEST-CODE",expiresAt:Math.floor(Date.now()/1000)+7*86400,maxUses:5});
   const inviteAction=ownerDirectory.root.querySelector<HTMLButtonElement>('[data-focuskey="invite"]')!;
   inviteAction.focus();inviteAction.click();await flush();
   const inviteDialog=document.querySelector<HTMLDialogElement>('.server-dialog')!;
-  check(inviteDialog.open && !!inviteDialog.querySelector('input[aria-label="Link de convite do servidor"]') && !ownerDirectory.root.querySelector('input[aria-label="Link de convite do servidor"]'),"Convite abre em diálogo sem inserir painel no topo do diretório");
+  const inviteLink=inviteDialog.querySelector<HTMLInputElement>('input[readonly]');
+  check(inviteDialog.open && !!inviteLink && inviteDialog.querySelector(`label[for="${inviteLink.id}"]`)?.textContent==="Link do convite" && !ownerDirectory.root.querySelector('input[readonly]'),"Convite abre em diálogo com rótulo visível, sem inserir painel no topo do diretório");
+  check(inviteDialog.textContent?.includes("Vale por 7 dias e para até 5 pessoas"),"Convite mostra validade e limite de usos");
+  await new Promise(resolve=>setTimeout(resolve,50));
+  check(inviteDialog.open,"Convite não fecha sozinho");
   const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
   const originalExecCommand = document.execCommand;
   try {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => {} } });
     const copyInvite = inviteDialog.querySelector<HTMLButtonElement>('[data-focuskey="copy-invite"]')!;
     copyInvite.click(); await flush();
-    check(inviteDialog.querySelector('[role="status"]')?.textContent === "Convite copiado.", "Cópia de convite anuncia sucesso em região de status");
+    check(inviteDialog.querySelector('[role="status"]')?.textContent?.startsWith("Cole o link") && copyInvite.textContent==="Link copiado" && inviteDialog.open, "Cópia de convite anuncia sucesso e mantém o diálogo aberto");
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => { throw Error("blocked"); } } });
     document.execCommand = () => false;
     copyInvite.click(); await flush();
@@ -260,8 +303,8 @@ try {
   check(!document.querySelector('.server-dialog') && document.activeElement===ownerDirectory.root.querySelector('[data-focuskey="invite"]'),"Fechar convite remove o diálogo e devolve foco ao botão");
   ownerDirectory.root.querySelector<HTMLButtonElement>('[data-focuskey="invite"]')!.click();await flush();
   const timedInvite=document.querySelector<HTMLDialogElement>('.server-dialog')!;
-  await new Promise(resolve=>setTimeout(resolve,8_100));
-  check(!timedInvite.isConnected&&!document.querySelector('.server-dialog'),"Convite desaparece automaticamente após oito segundos");
+  timedInvite.close();await flush();
+  check(!timedInvite.isConnected&&!document.querySelector('.server-dialog'),"Convite só fecha por ação de quem convida (Fechar ou Esc)");
   const embedded=document.createElement("section");embedded.textContent="Conteúdo em reprodução";
   ownerDirectory.pageHost.append(embedded);
   ownerDirectory.setPage("watch");
@@ -380,7 +423,7 @@ try {
   mute0.click();
   check(slots[0]!.querySelector("video")!.muted && !slots[1]!.querySelector("video")!.muted,"Mudo não afeta a outra tela");
   const buttons=Array.from(layout.root.querySelectorAll<HTMLButtonElement>("button"));
-  buttons.find(button=>button.textContent==="Tela 2")!.click();
+  buttons.find(button=>button.getAttribute("aria-label")?.startsWith("Selecionar Tela 2:"))!.click();
   document.dispatchEvent(new KeyboardEvent("keydown",{key:"m"}));
   check(slots[0]!.querySelector("video")!.muted && slots[1]!.querySelector("video")!.muted,"Atalho M controla apenas a tela selecionada");
   document.dispatchEvent(new KeyboardEvent("keydown",{key:"m",repeat:true}));
@@ -390,9 +433,22 @@ try {
   Object.defineProperty(navigator,"clipboard",{configurable:true,value:{writeText:async(text:string)=>{copiedDiagnostic=text;}}});
   const diagnosticButton=slots[0]!.querySelector<HTMLButtonElement>('.watch-diagnostics button[title^="Copie logo"]')!;
   const help=slots[0]!.querySelector<HTMLDetailsElement>('.watch-diagnostics')!;
-  check(!help.open && slots[0]!.querySelector('.hud')?.closest('details')===help,"Estatísticas e diagnóstico ficam sob demanda, fora do vídeo");
+  check(!help.open && slots[0]!.querySelector('.hud')?.closest('.watch-diagnostics')===help,"Estatísticas e diagnóstico ficam sob demanda, fora do vídeo");
   slots[0]!.querySelector<HTMLButtonElement>('.controls button[aria-label^="Ajuda"]')!.click();
   check(help.open,"Ajuda do player abre detalhes por ação sem interromper a live");
+  check(help.parentElement===layout.root.querySelector('.watch-help-host') && help.querySelector('.watch-help-actions')?.contains(diagnosticButton),
+    "Ajuda identificada ocupa o suporte do layout e oferece diagnóstico antes dos detalhes técnicos");
+  {
+    const host=layout.root.querySelector<HTMLElement>('.watch-help-host')!;
+    const selectorsPressed=Array.from(layout.root.querySelectorAll('.watch-selector')).filter(button=>button.getAttribute('aria-pressed')==='true');
+    check(layout.root.querySelector('.watch-grid')?.contains(host)===true && host.dataset.side==='end' && selectorsPressed.length===1,
+      "Ajuda da Tela 1 cobre só a área das telas, do outro lado, e o seletor marca uma tela");
+    const help2=slots[1]!.querySelector<HTMLDetailsElement>('.watch-diagnostics')!;
+    slots[1]!.querySelector<HTMLButtonElement>('.controls button[aria-label^="Ajuda"]')!.click();
+    check(help2.open && !help.open && help2.parentElement===host && host.dataset.side==='start' && host.querySelectorAll('.watch-diagnostics[open]').length===1,
+      "Trocar a ajuda para a Tela 2 fecha a anterior e abre sobre a Tela 1, sem esconder a pessoa escolhida");
+    slots[0]!.querySelector<HTMLButtonElement>('.controls button[aria-label^="Ajuda"]')!.click();
+  }
   diagnosticButton.click();await flush();
   check(diagnosticButton.textContent==="Copiado"&&JSON.parse(copiedDiagnostic).schema===1,"Diagnóstico é copiado por ação do espectador sem envio ao servidor");
   Object.defineProperty(navigator,"clipboard",{configurable:true,value:{writeText:async()=>{throw Error('clipboard recusado');}}});
@@ -406,7 +462,7 @@ try {
   bob.emit(RoomEvent.Reconnected);await flush();
   check(requests.filter(item=>item.path==="/api/watch/start").length===reconnectStarts&&videos[1]!.srcObject===streams[1],"Retomada do SDK não cria sessões extras na outra tela");
   const starts=requests.filter(item=>item.path==="/api/watch/start").length;
-  buttons.find(button=>button.textContent==="Tela 2")!.click();
+  buttons.find(button=>button.getAttribute("aria-label")?.startsWith("Selecionar Tela 2:"))!.click();
   const swap=buttons.find(button=>button.textContent==="Trocar destaque")!;
   const equal=buttons.find(button=>button.textContent==="Lado a lado")!;
   swap.click();
@@ -433,7 +489,7 @@ try {
     check(layout.root.querySelector(".featured-second") && bigButton,"Clicar em controle da tela menor não troca os tamanhos");
     divider.dispatchEvent(new MouseEvent("dblclick",{bubbles:true}));
     check(!layout.root.querySelector(".featured-first, .featured-second") && grid.style.getPropertyValue("--split-a")==="0.5fr","Duplo clique no divisor iguala as telas");
-    buttons.find(button=>button.textContent==="Tela 2")!.click();
+    buttons.find(button=>button.getAttribute("aria-label")?.startsWith("Selecionar Tela 2:"))!.click();
   }
   mute0.click();slots[1]!.querySelector<HTMLButtonElement>(".audio-ctl button")!.click();
   const savedAudio=localStorage.getItem("ms.audio.viewer.bob");
@@ -451,7 +507,7 @@ try {
   check(slots[1]!.classList.contains("selected"),"Foco seleciona a segunda tela");
   document.dispatchEvent(new KeyboardEvent("keydown",{key:"m"}));
   check(!videos[0]!.muted && videos[1]!.muted,"Foco por teclado seleciona a tela correspondente");
-  buttons.find(button=>button.textContent==="Tela 2")!.click();
+  buttons.find(button=>button.getAttribute("aria-label")?.startsWith("Selecionar Tela 2:"))!.click();
   buttons.find(button=>button.textContent==="Adicionar transmissão")!.click();
   check(adds===1 && bob.state==="connected" && carol.state==="connected","Escolher outra transmissão preserva as duas conexões");
   layout.watch({username:"legacy",displayName:"Cloudflare"});await flush();
@@ -459,7 +515,7 @@ try {
   check(requests.some(item=>item.path==="/api/watch/answer"),"Splitscreen misto conserva negociação Cloudflare");
   audioMode.checked=true;audioMode.dispatchEvent(new Event("change"));
   check(slots[1]!.querySelector("video")!.muted,"Segunda tela pode ficar sem som antes de sair do destaque");
-  slots[0]!.querySelectorAll<HTMLButtonElement>("button").forEach(button=>{if(button.textContent==="Sair da transmissão")button.click();});
+  slots[0]!.querySelectorAll<HTMLButtonElement>("button").forEach(button=>{if(button.getAttribute("aria-label")?.startsWith("Sair da transmissão:"))button.click();});
   check(layout.count===1 && !layout.root.querySelector(".watch-grid.split") && slots[1]!.querySelector("video")!.srcObject,"Fechar uma tela preserva a outra");
   check(swap.hidden && equal.hidden && !layout.root.querySelector(".featured-first, .featured-second"),"Fechar uma tela remove o destaque e oculta controles de duas telas");
   check(!slots[1]!.querySelector("video")!.muted,"Fechar o destaque libera som da única tela restante");

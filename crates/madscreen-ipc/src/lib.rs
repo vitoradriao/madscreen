@@ -94,6 +94,14 @@ pub struct SourceList {
     pub monitors: Vec<MonitorSource>,
     #[serde(default)]
     pub encoder: Option<EncoderLimits>,
+    /// NVENC respondeu na GPU padrão. `Some(false)` indica o caminho de compatibilidade
+    /// (AMF/QuickSync/x264 com readback); ausente em engine anterior.
+    #[serde(default)]
+    pub nvenc_available: Option<bool>,
+    /// PCI vendor da GPU padrão (0x8086 Intel, 0x1002 AMD, 0x10de NVIDIA); decide o
+    /// backend previsto sem NVENC. Ausente em engine anterior ou se a consulta falhar.
+    #[serde(default)]
+    pub gpu_vendor_id: Option<u32>,
 }
 
 /// Destino LiveKit; sem ele o engine captura e codifica sem publicar (útil para teste local).

@@ -64,9 +64,11 @@ jobs:
       - name: Guardar resultado e origem do instalador
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: installer-smoke-clean-windows
           path: |
             ${{ runner.temp }}/installer-smoke/result.json
             ${{ runner.temp }}/smoke-source.json
+          retention-days: 14
           if-no-files-found: warn

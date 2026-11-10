@@ -24,6 +24,9 @@ pub struct DesktopSource {
     gpu: GpuDevice,
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
+    /// Escolhida pelo automático: HDR ligado durante a sessão encerra o produtor e pede WGC.
+    automatic: bool,
+    hdr_switch: Arc<AtomicBool>,
 }
 impl DesktopSource {
     pub(crate) fn start(
@@ -31,6 +34,7 @@ impl DesktopSource {
         monitor: isize,
         options: CaptureOptions,
         notify: Arc<dyn Fn() + Send + Sync>,
+        automatic: bool,
     ) -> Result<Self, CaptureError> {
         Self::start_with_warning(
             gpu,
@@ -38,6 +42,7 @@ impl DesktopSource {
             options,
             notify,
             Arc::new(AtomicBool::new(false)),
+            automatic,
         )
     }
     fn start_with_warning(
@@ -46,6 +51,7 @@ impl DesktopSource {
         options: CaptureOptions,
         notify: Arc<dyn Fn() + Send + Sync>,
         warning: Arc<AtomicBool>,
+        automatic: bool,
     ) -> Result<Self, CaptureError> {
         let options = options.validate()?;
         let session = ffi::Session::open(&gpu, monitor)?;
@@ -67,10 +73,12 @@ impl DesktopSource {
         shared.active.store(true, Ordering::Release);
         let producer = shared.clone();
         let device = gpu.clone();
+        let hdr_switch = Arc::new(AtomicBool::new(false));
+        let switch = automatic.then(|| hdr_switch.clone());
         let worker = thread::Builder::new()
             .name("desktop-capture".into())
             .spawn(move || {
-                if let Err(error) = run(&device, monitor, options, session, &producer) {
+                if let Err(error) = run(&device, monitor, options, session, &producer, switch) {
                     producer.fail(error);
                 }
             })
@@ -82,7 +90,12 @@ impl DesktopSource {
             gpu,
             shared,
             worker: Some(worker),
+            automatic,
+            hdr_switch,
         })
+    }
+    pub(crate) fn hdr_switch_required(&self) -> bool {
+        self.hdr_switch.load(Ordering::Acquire)
     }
     pub(crate) fn stats(&self) -> Result<CaptureStats, CaptureError> {
         Ok(self
@@ -101,6 +114,7 @@ impl DesktopSource {
             self.options,
             notify,
             self.shared.display_warned.clone(),
+            self.automatic,
         )?;
         replacement.prior_counts = counts;
         *self = replacement;
@@ -152,6 +166,7 @@ fn run(
     options: CaptureOptions,
     initial: ffi::Session,
     shared: &Shared,
+    hdr_switch: Option<Arc<AtomicBool>>,
 ) -> windows::core::Result<()> {
     let mut session = Some(initial);
     let mut recovery_started = None;
@@ -165,7 +180,19 @@ fn run(
         if session.is_none() {
             match ffi::Session::open(gpu, monitor) {
                 Ok(restored) => {
-                    shared.refresh_display(true);
+                    let display = shared.refresh_display(true);
+                    if display.hdr_enabled == Some(true)
+                        && let Some(switch) = &hdr_switch
+                    {
+                        // BGRA8 da duplicação estoura o desktop HDR; o WGC entrega o SDR certo.
+                        tracing::warn!(
+                            "HDR ligado no monitor; encerrando a Desktop Duplication para usar WGC"
+                        );
+                        drop(restored);
+                        switch.store(true, Ordering::Release);
+                        shared.wake();
+                        return Ok(());
+                    }
                     session = Some(restored);
                     compositor.reset();
                     tracing::info!("Duplicação DXGI recriada; aguardando primeiro quadro");

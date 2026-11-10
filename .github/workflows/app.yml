@@ -83,14 +83,19 @@ jobs:
         run: |
           node tools/release/runtime-inventory.mjs target/encoder-runtime/madscreen-runtime-gpl apps/madscreen-app/src-tauri/encoder-runtime target/runtime-inventory.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # Artefatos contam na cota de 500 MB da conta (repo privado): instaladores ficam 1 dia (publicar
+      # a release no mesmo dia do build), JSON pequenos 14 dias, e falha de upload (cota) nao reprova
+      # o build. A publicacao usa os arquivos locais do job, nao os artefatos.
       - name: Guardar inventario para revisao
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: runtime-distribution
           path: |
             target/runtime-distribution.json
             target/runtime-inventory.json
+          retention-days: 14
           if-no-files-found: ignore
       - name: Copiar sidecar com o triple do alvo
         run: |
@@ -132,10 +137,11 @@ jobs:
           npx tauri build --bundles nsis --config $bundleConfigPath
       - name: Guardar instalador para repetir smoke sem recompilar
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: madscreen-installer-smoke-input
           path: apps/madscreen-app/src-tauri/target/release/bundle/nsis/*_x64-setup.exe
-          retention-days: 14
+          retention-days: 1
           if-no-files-found: error
       - name: Instalacao, upgrade e desinstalacao em maquina limpa
         env:
@@ -167,9 +173,11 @@ jobs:
       - name: Guardar resultado da instalacao limpa
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: installer-smoke-clean-windows
           path: ${{ runner.temp }}/installer-smoke/result.json
+          retention-days: 14
           if-no-files-found: warn
       - name: Manifesto e verificacao criptografica
         if: ${{ env.TAURI_SIGNING_PRIVATE_KEY != '' }}
@@ -193,6 +201,7 @@ jobs:
           $global:LASTEXITCODE = 0
       - name: Publicar instalador
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: madscreen-setup-windows-x64
           path: |
@@ -200,7 +209,7 @@ jobs:
             apps/madscreen-app/src-tauri/target/release/bundle/nsis/*.sig
             target/release-manifest/latest.json
             target/release-manifest/SHA256SUMS.txt
-          retention-days: 14
+          retention-days: 1
           if-no-files-found: error
       - name: Publicar release assinada sem expor o codigo privado
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}

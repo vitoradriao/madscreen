@@ -35,6 +35,10 @@ export interface UpdateController {
   dispose(): void;
 }
 
+function isStaleResource(error: unknown): boolean {
+  return /resource id \d+ is invalid/i.test(errorText(error));
+}
+
 const tauriBackend: UpdateBackend = {
   check: async () => (await import("@tauri-apps/plugin-updater")).check({ timeout: 30_000 }),
   prepareInstall: () => invoke<void>("prepare_update_install"),
@@ -88,6 +92,8 @@ export function createUpdateController(backend: UpdateBackend = tauriBackend, ti
       try {
         const found = await backend.check();
         if (disposed) { await found?.close(); return; }
+        // Download/instalação em curso usa o recurso atual: não o troque nem o feche agora.
+        if (busy()) { void found?.close().catch(() => undefined); return; }
         if (!found) {
           release();
           set({ kind: "current", manual });
@@ -112,7 +118,7 @@ export function createUpdateController(backend: UpdateBackend = tauriBackend, ti
     return checking;
   }
 
-  async function install(): Promise<void> {
+  async function install(retryStale = true): Promise<void> {
     const update = resource;
     if (disposed || !update || busy()) return;
     let received = 0;
@@ -136,7 +142,23 @@ export function createUpdateController(backend: UpdateBackend = tauriBackend, ti
       set({ kind: "installing", version: update.version });
       await update.install({ restartAfterInstall: true });
     } catch (error) {
+      // O recurso do plugin pode ter sido descartado no lado nativo: consulta de novo e tenta uma vez.
+      if (retryStale && isStaleResource(error) && await renew()) return install(false);
       set({ kind: "error", stage: "install", message: errorText(error), version: update.version, manual: true });
+    }
+  }
+
+  /** Reobtém o recurso da atualização; devolve false se não houver atualização utilizável. */
+  async function renew(): Promise<boolean> {
+    release();
+    try {
+      const fresh = await backend.check();
+      if (disposed || !fresh) { void fresh?.close().catch(() => undefined); return false; }
+      resource = fresh;
+      set({ kind: "available", version: fresh.version, currentVersion: fresh.currentVersion });
+      return true;
+    } catch {
+      return false;
     }
   }
 

@@ -47,6 +47,12 @@ pub struct SenderStats {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TuningDecision {
+    pub active: bool,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PublisherSample {
     pub schema: u32,
     /// Nonce local da execução, sem identidade, processo, sala ou credencial.
@@ -98,6 +104,58 @@ pub struct PublisherSample {
     pub applied_bitrate_bps: u32,
     pub reconfigure_max_ms: f64,
     pub sender: Option<SenderStats>,
+    /// Backend efetivo (`nvenc`, `amf`, `qsv`, `x264`...); ausente em engine anterior.
+    #[serde(default)]
+    pub encoder: Option<String>,
+    #[serde(default)]
+    pub output_width: Option<u32>,
+    #[serde(default)]
+    pub output_height: Option<u32>,
+    #[serde(default)]
+    pub fps_target: Option<f64>,
+    /// Tamanho do VBV em quadros (1 = um quadro de bitrate/fps).
+    #[serde(default)]
+    pub vbv_frames: Option<u32>,
+    /// CPU do processo do engine no intervalo, em % da máquina inteira (todos os núcleos lógicos).
+    #[serde(default)]
+    pub process_cpu_percent: Option<f64>,
+    /// Optional load-controller state; absent in older publishers or with the controller off.
+    #[serde(default)]
+    pub governor_fps: Option<u32>,
+    #[serde(default)]
+    pub governor_resolution: Option<String>,
+    #[serde(default)]
+    pub governor_changes: Option<u64>,
+    #[serde(default)]
+    pub governor_time_at_step_ms: Option<Vec<u64>>,
+    #[serde(default)]
+    pub governor_last_reason: Option<String>,
+    /// Effective converter filter (`bilinear`, `box4x4`, `video_processor`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduction_filter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_preset_tuning: Option<TuningDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat_vbv_tuning: Option<TuningDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_governor_tuning: Option<TuningDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub async_readback_tuning: Option<TuningDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduction_box_tuning: Option<TuningDecision>,
+    /// Máximos do readback FFmpeg no intervalo; ausentes no NVENC (zero-copy).
+    #[serde(default)]
+    pub readback_map_max_ms: Option<f64>,
+    #[serde(default)]
+    pub readback_copy_max_ms: Option<f64>,
+    #[serde(default)]
+    pub codec_send_max_ms: Option<f64>,
+    /// Repetições do último quadro com a tela parada, acumuladas na execução.
+    #[serde(default)]
+    pub static_refine_frames: Option<u64>,
+    /// IDRs de repouso, acumulados na execução.
+    #[serde(default)]
+    pub idle_keyframes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -175,6 +233,85 @@ mod tests {
         };
         let roundtrip: PublisherSample = serde_json::from_str(&serde_json::to_string(&new)?)?;
         assert_eq!(roundtrip.pipeline_blocked_ms, Some(0.));
+        Ok(())
+    }
+    #[test]
+    fn old_samples_leave_encoder_path_fields_unavailable() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let fields = [
+            "encoder",
+            "output_width",
+            "output_height",
+            "fps_target",
+            "vbv_frames",
+            "process_cpu_percent",
+            "governor_fps",
+            "governor_resolution",
+            "governor_changes",
+            "governor_time_at_step_ms",
+            "governor_last_reason",
+            "reduction_filter",
+            "readback_map_max_ms",
+            "readback_copy_max_ms",
+            "codec_send_max_ms",
+            "static_refine_frames",
+            "idle_keyframes",
+        ];
+        let mut value = serde_json::to_value(PublisherSample::default())?;
+        let object = value.as_object_mut().ok_or("sample object")?;
+        for field in fields {
+            if field == "reduction_filter" {
+                // Optional field is omitted when None and accepted when absent.
+                assert!(object.remove(field).is_none());
+            } else {
+                assert!(object.remove(field).is_some(), "{field} ausente no schema");
+            }
+        }
+        let old: PublisherSample = serde_json::from_value(value)?;
+        assert_eq!(old, PublisherSample::default());
+        let new = PublisherSample {
+            encoder: Some("qsv".into()),
+            output_width: Some(1920),
+            output_height: Some(1080),
+            fps_target: Some(30.),
+            vbv_frames: Some(1),
+            process_cpu_percent: Some(12.5),
+            governor_fps: Some(20),
+            governor_resolution: Some("native".into()),
+            governor_changes: Some(2),
+            governor_time_at_step_ms: Some(vec![5000, 10000]),
+            governor_last_reason: Some("sustained_overload".into()),
+            reduction_filter: Some("box4x4".into()),
+            readback_map_max_ms: Some(3.2),
+            static_refine_frames: Some(8),
+            idle_keyframes: Some(1),
+            ..Default::default()
+        };
+        let roundtrip: PublisherSample = serde_json::from_str(&serde_json::to_string(&new)?)?;
+        assert_eq!(roundtrip, new);
+        Ok(())
+    }
+    #[test]
+    fn tuning_status_is_additive_and_explains_both_states() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let old: PublisherSample =
+            serde_json::from_value(serde_json::to_value(PublisherSample::default())?)?;
+        assert_eq!(old.screen_preset_tuning, None);
+        assert_eq!(old.async_readback_tuning, None);
+        let sample = PublisherSample {
+            screen_preset_tuning: Some(TuningDecision {
+                active: true,
+                reason: "compatibilidade".into(),
+            }),
+            async_readback_tuning: Some(TuningDecision {
+                active: false,
+                reason: "AMF".into(),
+            }),
+            ..old
+        };
+        let restored: PublisherSample = serde_json::from_str(&serde_json::to_string(&sample)?)?;
+        assert_eq!(restored.screen_preset_tuning, sample.screen_preset_tuning);
+        assert_eq!(restored.async_readback_tuning, sample.async_readback_tuning);
         Ok(())
     }
     #[test]

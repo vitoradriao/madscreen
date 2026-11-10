@@ -136,7 +136,7 @@ try {
     await inspect('Destaque antes da tela cheia');
     await evaluate(`(() => {
       window.fullscreenCheck={streams:[...document.querySelectorAll('video')].map(video=>video.srcObject),classes:document.querySelector('.watch-grid').className};
-      [...document.querySelectorAll('button')].find(button=>button.textContent==='Tela 1').click();
+      [...document.querySelectorAll('button')].find(button=>button.getAttribute('aria-label')?.startsWith('Selecionar Tela 1:')).click();
     })()`);
     const splitFullscreen=await send('Runtime.evaluate',{expression:`document.querySelectorAll('.stage')[1].requestFullscreen()`,awaitPromise:true,userGesture:true});
     if(splitFullscreen.exceptionDetails)throw Error('Não entrou em tela cheia no splitscreen');
@@ -157,15 +157,17 @@ try {
     const helpFullscreen=await send('Runtime.evaluate',{expression:`document.querySelectorAll('.stage')[1].requestFullscreen()`,awaitPromise:true,userGesture:true});
     if(helpFullscreen.exceptionDetails)throw Error('Não entrou em tela cheia para verificar ajuda');
     await evaluate(`document.querySelectorAll('.stage')[1].querySelector('button[aria-label^="Ajuda"]').click()`);
-    const helpAccessible=await evaluate(`new Promise(resolve=>setTimeout(()=>resolve(!document.fullscreenElement&&document.querySelectorAll('.watch-diagnostics')[1].open),100))`);
+    const helpAccessible=await evaluate(`new Promise(resolve=>setTimeout(()=>resolve(!!document.fullscreenElement?.querySelector('.watch-diagnostics[open]')),100))`);
     if(!helpAccessible)throw Error('Ajuda ficou oculta fora do elemento em tela cheia');
-    await evaluate(`document.querySelectorAll('.watch-diagnostics')[1].open=false`);
-    result.checks.push('Ajuda sai de tela cheia para mostrar detalhes sem interromper a mídia');
+    await evaluate(`document.fullscreenElement.querySelector('button[aria-label^="Fechar ajuda"]').click()`);
+    if(!await evaluate('!!document.fullscreenElement'))throw Error('Fechar ajuda saiu da tela cheia');
+    await evaluate('document.exitFullscreen()');
+    result.checks.push('Ajuda abre e fecha dentro da tela cheia sem interromper a mídia');
     const featuredScreenshot=await send('Page.captureScreenshot',{format:'png'});
     await writeFile(path.join(output,'featured-splitscreen.png'),Buffer.from(featuredScreenshot.data,'base64'));
     result.checks.push('Destaque 70/30 horizontal e vertical preserva proporção e cabe na janela');
     result.checks.push('Tela cheia preserva duas mídias, limita atalhos à tela visível e restaura destaque');
-    await evaluate(`[...document.querySelectorAll('.watch-slot')[1].querySelectorAll('button')].find(button=>button.textContent==='Sair da transmissão').click()`);
+    await evaluate(`[...document.querySelectorAll('.watch-slot')[1].querySelectorAll('button')].find(button=>button.getAttribute('aria-label')?.startsWith('Sair da transmissão:')).click()`);
     await send('Emulation.setDeviceMetricsOverride',{width:3440,height:1440,deviceScaleFactor:1,mobile:false});
     geometry.push(...await inspect('16:9 em 21:9'));
     if(geometry.at(-1).bars[0]<=0)throw Error('Esperadas barras pretas laterais em 21:9');
@@ -317,6 +319,9 @@ try {
         return Math.min(nav.right, button.right) - Math.max(nav.left, button.left) >= 48;
       })()`);
       if (!tabVisible) throw Error('Aba ativa encoberta pelo cabeçalho em '+width);
+      // Abaixo de 960 px a lista de membros começa fechada (painel sobreposto); abrir pelo botão como a pessoa faria.
+      await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => { const members = document.querySelector('.server-members'); if (members?.hidden) document.querySelector('[data-focuskey="toggle-members"]').click(); resolve(); })))`);
+      if (await evaluate(`document.querySelector('.server-members').getBoundingClientRect().width < 200`)) throw Error('Lista de membros espremida em '+width);
       for (const selector of menuSelectors) {
         await evaluate(`document.querySelector(${JSON.stringify(selector + ' > summary')}).click()`);
         const bounds = await menuBounds(selector);

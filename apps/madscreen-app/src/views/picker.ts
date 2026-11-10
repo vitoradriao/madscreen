@@ -161,7 +161,7 @@ function focusableIn(root: ParentNode): HTMLElement[] {
  * seletor do Windows (também quando a listagem falha) ou `null` se o usuário cancelar.
  */
 export function pickSource(signal?: AbortSignal, options: {
-  quickStart?: boolean; recent?:AppPreference[]; onRecent?(preference:AppPreference):void; clearRecent?():void; removeRecent?(appId:string):void;
+  quickStart?: boolean; liveChange?: boolean; recent?:AppPreference[]; onRecent?(preference:AppPreference):void; clearRecent?():void; removeRecent?(appId:string):void;
 } = {}): Promise<PickedSource | null> {
   if (signal?.aborted) return Promise.resolve(null);
   return new Promise((resolve) => {
@@ -199,20 +199,25 @@ export function pickSource(signal?: AbortSignal, options: {
     const body = el("div", { class: "pk-body" });
     const audioPanel = el("section", { class: "pk-audio" });
     audioPanel.setAttribute("aria-label", "Som da transmissão");
+    const instructions = el("p", { class: "muted small", id: "pk-instructions", textContent: options.liveChange
+      ? "Escolha o som antes da fonte. Ao escolher a fonte, imagem e som serão trocados na live."
+      : options.quickStart
+      ? "Escolha o som antes da fonte. Clique na fonte para transmitir com a qualidade salva."
+      : "Escolha o som antes da fonte. Ao escolher a fonte, você volta para revisar e confirmar." });
+    if (options.recent?.length) instructions.append(" O som salvo na fonte vale até você alterar o painel.");
+    const scopeHint = el("p", { class: "pk-scope muted small" });
 
     const dialog = el(
       "div",
       { class: "pk-dialog", role: "dialog" },
       el("header", { class: "pk-head" }, el("h2", {}, "Escolha o que compartilhar"), close),
       el("div", { class: "pk-bar" }, tabs.root, refresh),
-      body,
-      audioPanel,
-      el("footer", { class: "pk-foot" }, el("span", { class: "muted small", textContent: options.quickStart
-        ? "Clique na fonte para transmitir com a qualidade salva. Confira o modo de som indicado na fonte; alterar o painel substitui o modo salvo."
-        : "Confira a configuração salva na fonte antes de continuar. Alterar o som no painel substitui o modo salvo." }), fallback),
+      el("div", { class: "pk-content" }, audioPanel, scopeHint, body),
+      el("footer", { class: "pk-foot" }, instructions, fallback),
     );
     dialog.setAttribute("aria-modal", "true");
     dialog.setAttribute("aria-label", "Escolha o que compartilhar");
+    dialog.setAttribute("aria-describedby", instructions.id);
     const overlay = el("div", { class: "pk-overlay" }, dialog);
 
     /** O som que acompanha a escolha: o app da janela, ou os apps/PC marcados para uma tela. */
@@ -260,9 +265,11 @@ export function pickSource(signal?: AbortSignal, options: {
         return;
       }
       const system = checkRow("Som do PC todo", "Tudo que toca no PC, menos o próprio madscreen.", prefs.system, (value) => {
+        const focused = document.activeElement === system.input;
         prefs.system = value;
         saveAudioPrefs(prefs);
         renderAudio();
+        if (focused) audioPanel.querySelector<HTMLInputElement>("input")?.focus();
       });
       const list = el("div", { class: "pk-audio-list" });
       if (audioError) {
@@ -354,6 +361,9 @@ export function pickSource(signal?: AbortSignal, options: {
 
     function render() {
       tabs.set(tab);
+      scopeHint.textContent = tab === "windows"
+        ? "Compartilhe uma janela. As outras ficam fora da transmissão."
+        : "Tudo o que aparecer nesta tela poderá ser visto, inclusive notificações.";
       renderAudio();
       syncAudioPoll();
       refresh.disabled = loading;

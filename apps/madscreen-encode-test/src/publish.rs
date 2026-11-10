@@ -1,5 +1,6 @@
 //! Saída opcional LiveKit/Cloudflare (feature `publish`): publica os access units H.264
 //! do NVENC sem re-encode e repassa pedidos de keyframe/taxa do WebRTC ao encoder.
+use crate::load_governor::{LoadGovernor, Target, Window};
 use crate::options::{Options, Transport};
 use anyhow::Result;
 use madscreen_audio::{AudioCapture, AudioSourceSpec};
@@ -35,7 +36,8 @@ pub struct Live {
     redraw_requested: bool,
     last_keyframe: i64,
     last_au: Option<i64>,
-    delta_since_keyframe: bool,
+    /// Repetições do último quadro depois de cada IDR com a tela parada.
+    refine: madscreen_encode::refine::StaticRefine,
     idle_keyframes: u64,
     rate_requests: u64,
     rate_applied: u64,
@@ -43,6 +45,11 @@ pub struct Live {
     wanted_bps: Option<u32>,
     last_request_bps: u64,
     diagnostic: Option<DiagnosticWindow>,
+    governor: Option<LoadGovernor>,
+    governor_wait_max_ms: f64,
+    governor_at_ms: u64,
+    /// Bytes de AU desde a última janela do governador (sinal de banda).
+    governor_bytes: u64,
 }
 
 struct DiagnosticWindow {
@@ -59,6 +66,9 @@ struct DiagnosticWindow {
     queue_wait_max_ms: Option<f64>,
     encode_wait_max_ms: f64,
     reconfigure_max_ms: f64,
+    readback_map_max_ms: Option<f64>,
+    readback_copy_max_ms: Option<f64>,
+    codec_send_max_ms: Option<f64>,
 }
 
 impl DiagnosticWindow {
@@ -81,6 +91,9 @@ impl DiagnosticWindow {
             queue_wait_max_ms: None,
             encode_wait_max_ms: 0.,
             reconfigure_max_ms: 0.,
+            readback_map_max_ms: None,
+            readback_copy_max_ms: None,
+            codec_send_max_ms: None,
         }
     }
 }
@@ -95,9 +108,18 @@ impl Live {
         self.publisher.is_connected()
     }
 
-    pub fn connect(options: &Options, config: &EncoderConfig) -> Result<Self> {
+    pub fn connect(
+        options: &Options,
+        config: &EncoderConfig,
+        governor_enabled: bool,
+        governor_cpu_signals: bool,
+    ) -> Result<Self> {
+        // Laboratório #14: AV1 só pelo transporte do Worker/laboratório local, com opt-in explícito.
+        let lab_av1 = config.codec == madscreen_encode::VideoCodec::Av1
+            && std::env::var("MADSCREEN_LAB_AV1_PUBLISH").is_ok_and(|value| value == "1")
+            && matches!(options.transport, Transport::Cloudflare);
         anyhow::ensure!(
-            config.codec == madscreen_encode::VideoCodec::H264,
+            config.codec == madscreen_encode::VideoCodec::H264 || lab_av1,
             "publicação suporta apenas H.264 por enquanto (use --codec h264)"
         );
         let publisher: Box<dyn Publisher> = match options.transport {
@@ -168,15 +190,16 @@ impl Live {
                         }
                         _ => None,
                     },
-                    h264_level_idc: if options.cf_profile_level_id.is_none() {
+                    h264_level_idc: if options.cf_profile_level_id.is_none() && !lab_av1 {
                         config.h264_level
                     } else {
                         None
                     },
-                    only_h264: true,
+                    only_h264: !lab_av1,
                     keepalive: options.cf_keepalive,
                     start_bitrate_bps: options.cf_start_bitrate.map(|mbps| (mbps * 1e6) as u64),
                     audio: options.audio_requested(),
+                    lab_av1,
                 };
                 if options.cf_profile_level_id.is_none()
                     && let Some(level) = publish.h264_level_idc
@@ -248,7 +271,7 @@ impl Live {
             redraw_requested: false,
             last_keyframe: i64::MIN / 2,
             last_au: None,
-            delta_since_keyframe: false,
+            refine: madscreen_encode::refine::StaticRefine::new(),
             idle_keyframes: 0,
             rate_requests: 0,
             rate_applied: 0,
@@ -256,6 +279,18 @@ impl Live {
             wanted_bps: None,
             last_request_bps: 0,
             diagnostic: options.diagnostics.then(DiagnosticWindow::new),
+            governor: governor_enabled.then(|| {
+                let governor =
+                    LoadGovernor::new(config.fps.as_f64().ceil() as u32, config.height == 1080, 0);
+                if governor_cpu_signals {
+                    governor
+                } else {
+                    governor.rate_only()
+                }
+            }),
+            governor_wait_max_ms: 0.,
+            governor_at_ms: 0,
+            governor_bytes: 0,
         })
     }
 
@@ -293,13 +328,27 @@ impl Live {
         let idle_s = self
             .last_au
             .map_or(0., |at| (now - at).max(0) as f64 / self.frequency as f64);
-        self.force_keyframe(encoder, now, self.delta_since_keyframe && idle_s >= 1.);
+        // Repetições de refino não contam como conteúdo: não rearmam o IDR de repouso.
+        self.force_keyframe(
+            encoder,
+            now,
+            self.refine.content_since_keyframe() && idle_s >= 1.,
+        );
         let redraw_after_s = (2. * self.fps.den as f64 / self.fps.num as f64).max(0.05);
         if self.keyframe_armed && !self.redraw_requested && idle_s >= redraw_after_s {
             self.redraw_requested = true;
             return Ok(true);
         }
-        Ok(false)
+        // Depois do IDR com a tela parada, repete o último quadro a cada período do FPS pedido
+        // (no máximo 60 Hz) para o encoder refinar a imagem como P.
+        let period_ms = (1000. * self.fps.den as f64 / self.fps.num as f64).max(1000. / 60.);
+        let now_ms = (now.max(0) as f64 * 1000. / self.frequency as f64) as u64;
+        Ok(self.refine.wants(
+            now_ms,
+            (idle_s * 1000.) as u64,
+            period_ms as u64,
+            self.keyframe_armed || self.keyframe_pending,
+        ))
     }
 
     pub fn write(&mut self, au: &AuBuffer, encoder: &mut AutoEncoder) -> Result<bool> {
@@ -337,6 +386,10 @@ impl Live {
                     &mut window.queue_wait_max_ms,
                     stage(au.timing.qpc_convert_end, au.timing.qpc_encode_start),
                 ),
+                // Só o caminho FFmpeg preenche estes tempos (readback NV12 explícito).
+                (&mut window.readback_map_max_ms, au.timing.readback_map_ms),
+                (&mut window.readback_copy_max_ms, au.timing.readback_copy_ms),
+                (&mut window.codec_send_max_ms, au.timing.codec_send_ms),
             ] {
                 if let Some(value) = value {
                     *maximum = Some(maximum.unwrap_or(0.).max(value));
@@ -346,6 +399,16 @@ impl Live {
                 * 1000.
                 / self.frequency as f64;
             window.encode_wait_max_ms = window.encode_wait_max_ms.max(encode_ms);
+        }
+        if self.governor.is_some() {
+            // Async staging includes a deliberate frame of queueing in QPC elapsed;
+            // codec_send is the relevant CPU wait when that path is active.
+            let wait_ms = au.timing.codec_send_ms.unwrap_or_else(|| {
+                (au.timing.qpc_encode_end - au.timing.qpc_encode_start).max(0) as f64 * 1000.
+                    / self.frequency as f64
+            });
+            self.governor_wait_max_ms = self.governor_wait_max_ms.max(wait_ms);
+            self.governor_bytes = self.governor_bytes.saturating_add(au.data.len() as u64);
         }
         let accepted =
             self.publisher
@@ -362,7 +425,7 @@ impl Live {
             self.redraw_requested = false;
         }
         if accepted {
-            self.delta_since_keyframe = au.kind != FrameKind::Key;
+            self.refine.on_access_unit(au.kind == FrameKind::Key);
         }
         self.force_keyframe(encoder, now, false);
         if let Some(request) = self.publisher.take_rate_request() {
@@ -459,10 +522,48 @@ impl Live {
             .map(|window| (window.run_id.clone(), window.origin))
     }
 
+    pub fn governor_tick(
+        &mut self,
+        at_ms: u64,
+        captured: u64,
+        submitted: u64,
+        process_cpu_cores: Option<f64>,
+    ) -> Option<Target> {
+        let governor = self.governor.as_mut()?;
+        let wait_ms = std::mem::take(&mut self.governor_wait_max_ms);
+        let bytes = std::mem::take(&mut self.governor_bytes);
+        let elapsed_ms = at_ms.saturating_sub(self.governor_at_ms);
+        // A primeira janela não tem início conhecido; o governador valida a duração das demais.
+        let produced_bps = (self.governor_at_ms > 0 && elapsed_ms > 0)
+            .then(|| bytes.saturating_mul(8_000) / elapsed_ms);
+        self.governor_at_ms = at_ms;
+        governor.observe(Window {
+            at_ms,
+            captured,
+            submitted,
+            encode_wait_max_ms: Some(wait_ms),
+            process_cpu_cores,
+            system_cpu_percent: None,
+            requested_bps: (self.last_request_bps > 0).then_some(self.last_request_bps),
+            produced_bps,
+        })
+    }
+    pub fn disable_governor(&mut self) {
+        self.governor = None;
+    }
+    /// Última taxa aceita pelo encoder; um encoder recriado deve começar dela, não do teto.
+    pub fn applied_bitrate_bps(&self) -> u32 {
+        self.last_bps
+    }
+
     pub fn diagnostic_sample(&mut self) -> Option<madscreen_ipc::diagnostics::PublisherSample> {
         let window = self.diagnostic.as_mut()?;
         let (pushed, rejected) = self.publisher.counts();
         let (audio_pushed, audio_rejected) = self.publisher.audio_counts();
+        let governor_diag = self
+            .governor
+            .as_ref()
+            .map(|governor| governor.diagnostics(self.governor_at_ms));
         let sample = madscreen_ipc::diagnostics::PublisherSample {
             schema: 1,
             run_id: window.run_id.clone(),
@@ -490,8 +591,39 @@ impl Live {
             applied_bitrate_bps: self.last_bps,
             reconfigure_max_ms: window.reconfigure_max_ms,
             sender: self.publisher.sender_stats(),
+            readback_map_max_ms: window.readback_map_max_ms,
+            readback_copy_max_ms: window.readback_copy_max_ms,
+            codec_send_max_ms: window.codec_send_max_ms,
+            static_refine_frames: Some(self.refine.frames),
+            idle_keyframes: Some(self.idle_keyframes),
+            governor_fps: governor_diag.as_ref().map(|g| g.target.fps),
+            governor_resolution: governor_diag.as_ref().map(|g| match g.target.resolution {
+                crate::load_governor::ResolutionStep::Native => "native".into(),
+                crate::load_governor::ResolutionStep::Hd720 => "720p".into(),
+            }),
+            governor_changes: governor_diag.as_ref().map(|g| g.change_count),
+            governor_time_at_step_ms: governor_diag.as_ref().map(|g| g.time_at_step_ms.clone()),
+            governor_last_reason: governor_diag.as_ref().and_then(|g| g.last_reason).map(
+                |reason| match reason {
+                    crate::load_governor::ChangeReason::SustainedOverload => {
+                        "sustained_overload".into()
+                    }
+                    crate::load_governor::ChangeReason::SustainedHealth => {
+                        "sustained_health".into()
+                    }
+                    crate::load_governor::ChangeReason::BandwidthOverload => {
+                        "bandwidth_overload".into()
+                    }
+                    crate::load_governor::ChangeReason::BandwidthRecovery => {
+                        "bandwidth_recovery".into()
+                    }
+                },
+            ),
             ..Default::default()
         };
+        window.readback_map_max_ms = None;
+        window.readback_copy_max_ms = None;
+        window.codec_send_max_ms = None;
         window.max_au_bytes = 0;
         window.capture_to_au_max_ms = 0.;
         window.capture_to_convert_max_ms = None;

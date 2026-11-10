@@ -236,3 +236,26 @@ test("token legado sem j migra sua linhagem na renovacao e logout invalida as du
     assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM users WHERE id=?").get(uid).n,1);
   } finally {f.db.close();}
 });
+
+test("troca da chave de recuperacao invalida a antiga e nao vale para conta OAuth", async () => {
+  const f = database();
+  try {
+    const hub = f.open();
+    const { uid, recoveryKey } = await hub.register("127.0.0.1", "rotation_fixture", "");
+    const { token } = await signSession(uid, f.env.SESSION_SECRET);
+    const call = (method, path) => worker.fetch(new Request(`https://worker.example.com${path}`, { method, headers: { Authorization: `Bearer ${token}` } }), f.env);
+    assert.deepEqual((await (await call("GET", "/api/me")).json()).account, { recoveryKey: true });
+    const rotated = await call("POST", "/api/me/recovery-key");
+    assert.equal(rotated.status, 200);
+    const { recoveryKey: next } = await rotated.json();
+    assert.match(next, /^[A-Z0-9]{5}(-[A-Z0-9]{5}){3}$/);
+    assert.notEqual(next, recoveryKey);
+    await assert.rejects(hub.login("127.0.0.1", "rotation_fixture", recoveryKey), failure("credenciais_invalidas"));
+    assert.equal((await hub.login("127.0.0.1", "rotation_fixture", next)).uid, uid);
+    const discord = await oauth(hub, "rotation_discord");
+    const oauthToken = (await signSession(discord, f.env.SESSION_SECRET)).token;
+    const oauthCall = (method, path) => worker.fetch(new Request(`https://worker.example.com${path}`, { method, headers: { Authorization: `Bearer ${oauthToken}` } }), f.env);
+    assert.deepEqual((await (await oauthCall("GET", "/api/me")).json()).account, { recoveryKey: false });
+    assert.equal((await oauthCall("POST", "/api/me/recovery-key")).status, 409);
+  } finally { f.db.close(); }
+});

@@ -1,4 +1,4 @@
-use crate::{EncodeError, Result, nvenc_sys as sys};
+use crate::{EncodeError, Result, backend::BackendKind, nvenc_sys as sys};
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -95,6 +95,16 @@ pub struct EncoderConfig {
     /// Laboratory spatial AQ; disabled by default. No temporal AQ/lookahead.
     pub spatial_aq: bool,
     pub readback_metrics: bool,
+    /// Delayed staging readback for FFmpeg backends; remains opt-in until measured.
+    pub async_readback: bool,
+    /// App-wide compatibility tuning switch. Explicit CLI A/B overrides are ignored when false.
+    pub compat_tuning: bool,
+    /// None uses the compatibility policy; Some(1..=8) is a laboratory override.
+    pub compat_vbv_frames: Option<u32>,
+    /// Laboratory override for delayed readback on compatibility backends.
+    pub async_readback_override: Option<bool>,
+    /// Laboratory override for the x264 screen preset at <=30 fps.
+    pub x264_screen_preset_override: Option<bool>,
     pub intra_refresh: Option<IntraRefresh>,
 }
 impl Default for EncoderConfig {
@@ -112,6 +122,11 @@ impl Default for EncoderConfig {
             multipass: MultiPass::Disabled,
             spatial_aq: false,
             readback_metrics: false,
+            async_readback: false,
+            compat_tuning: true,
+            compat_vbv_frames: None,
+            async_readback_override: None,
+            x264_screen_preset_override: None,
             intra_refresh: None,
         }
     }
@@ -162,6 +177,12 @@ impl EncoderConfig {
 
     pub fn validate(&self) -> Result<()> {
         FrameRate::new(self.fps.num, self.fps.den)?;
+        if self
+            .compat_vbv_frames
+            .is_some_and(|frames| !(1..=8).contains(&frames))
+        {
+            return Err(EncodeError::InvalidConfig("compat_vbv_frames exige 1..=8"));
+        }
         if self.codec == VideoCodec::H264
             && self.h264_level.is_some_and(|level| {
                 !i32::try_from(level).is_ok_and(|level| {
@@ -231,9 +252,105 @@ impl EncoderConfig {
         (self.width as usize * self.height as usize * 4).max(1024 * 1024)
     }
 }
+
+/// The compatibility policy is applied after backend selection, before opening it.
+pub fn compatibility_backend(kind: BackendKind) -> bool {
+    matches!(
+        kind,
+        BackendKind::X264 | BackendKind::Qsv | BackendKind::Mf | BackendKind::OpenH264
+    )
+}
+
+pub fn compat_tuning_from_value(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| value.eq_ignore_ascii_case("off"))
+}
+
+/// Read the process-wide return switch once for all AutoEncoder callers.
+pub fn compat_tuning_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let value = std::env::var("MADSCREEN_COMPAT_TUNING").ok();
+        compat_tuning_from_value(value.as_deref())
+    })
+}
+
+pub fn effective_config(kind: BackendKind, requested: &EncoderConfig) -> EncoderConfig {
+    let mut effective = requested.clone();
+    effective.async_readback = false;
+    if requested.compat_tuning && compatibility_backend(kind) {
+        effective.async_readback = requested.async_readback_override.unwrap_or(true);
+        if matches!(kind, BackendKind::X264 | BackendKind::Qsv) {
+            // Four frames is the owner's provisional compatibility default;
+            // A/B with a real viewer remains pending.
+            effective.vbv_frames = requested.compat_vbv_frames.unwrap_or(4);
+        }
+    }
+    effective
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compatibility_policy_preserves_nvenc_amf_and_rolls_back() -> Result<()> {
+        let base = EncoderConfig::default();
+        for kind in [BackendKind::Nvenc, BackendKind::Amf] {
+            let effective = effective_config(kind, &base);
+            assert_eq!(effective.vbv_frames, base.vbv_frames);
+            assert!(!effective.async_readback);
+        }
+        for kind in [BackendKind::X264, BackendKind::Qsv] {
+            let mut effective = effective_config(kind, &base);
+            assert_eq!(effective.vbv_frames, 4);
+            assert!(effective.async_readback);
+            effective.bitrate_bps = 9_000_000;
+            effective.validate()?;
+            assert_eq!(effective.vbv_frames, 4);
+            assert_eq!(effective.vbv_bits()?, 250_000);
+        }
+        for kind in [BackendKind::Mf, BackendKind::OpenH264] {
+            let effective = effective_config(kind, &base);
+            assert_eq!(effective.vbv_frames, 1);
+            assert!(effective.async_readback);
+        }
+        let rollback = EncoderConfig {
+            compat_tuning: false,
+            compat_vbv_frames: Some(6),
+            async_readback_override: Some(true),
+            ..base.clone()
+        };
+        for kind in [
+            BackendKind::X264,
+            BackendKind::Qsv,
+            BackendKind::Mf,
+            BackendKind::OpenH264,
+        ] {
+            let effective = effective_config(kind, &rollback);
+            assert_eq!(effective.vbv_frames, 1);
+            assert!(!effective.async_readback);
+        }
+        let override_config = EncoderConfig {
+            compat_vbv_frames: Some(6),
+            async_readback_override: Some(false),
+            ..base
+        };
+        assert_eq!(
+            effective_config(BackendKind::X264, &override_config).vbv_frames,
+            6
+        );
+        assert!(!effective_config(BackendKind::X264, &override_config).async_readback);
+        for bad in [0, 9] {
+            let invalid = EncoderConfig {
+                compat_vbv_frames: Some(bad),
+                ..override_config.clone()
+            };
+            assert!(invalid.validate().is_err());
+        }
+        Ok(())
+    }
+    #[test]
+    fn delayed_readback_is_opt_in() {
+        assert!(!EncoderConfig::default().async_readback);
+    }
     #[test]
     fn h264_bitrate_limits_cover_cb_main_high_and_every_level() {
         for (level, base) in [

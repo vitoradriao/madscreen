@@ -11,6 +11,7 @@ import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { showTrayNotice } from "./tray-notice";
+import { installTitlebar } from "./titlebar";
 import { createLoginScreen } from "./views/login";
 import { createSettingsView } from "./views/settings";
 import { createUpdateNotice } from "./views/update-notice";
@@ -20,6 +21,7 @@ import { createWatchView } from "./views/watch";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 initializeTheme();
+installTitlebar();
 let hub: { close(): void } | null = null;
 let unlistenShare: (() => void) | null = null;
 let disposeShell = (): void => {};

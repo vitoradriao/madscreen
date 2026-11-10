@@ -5,6 +5,7 @@ mod convert_ffi;
 pub use convert_ffi::{Converter, SyntheticSource};
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) mod nv12_i420;
+pub mod reduction;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConvertMode {
     Shader,

@@ -1,11 +1,13 @@
 //! Codificação de vídeo com seleção NVENC D3D11, AMD AMF, Intel QSV e CPU x264.
 pub mod backend;
+mod backend_options;
 pub mod bitstream;
 pub mod config;
 pub mod metrics;
 pub mod pacer;
 pub mod pipeline;
 pub mod rate;
+pub mod refine;
 // Bindings e configuração ABI também são testados sem GPU no Linux x64.
 #[cfg(windows)]
 pub mod auto;

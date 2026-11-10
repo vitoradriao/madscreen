@@ -1,7 +1,9 @@
 use crate::{Error, Result};
 
-/// Não entrega AUs H.264 a um sender negociado para outro codec ou faixa rejeitada.
-pub(crate) fn validate_answer(sdp: &str) -> Result<()> {
+/// Não entrega AUs a um sender negociado para outro codec ou faixa rejeitada.
+/// `lab_av1` (laboratório #14) exige AV1 em vez de H.264.
+pub(crate) fn validate_answer(sdp: &str, lab_av1: bool) -> Result<()> {
+    let expected = if lab_av1 { "AV1/90000" } else { "H264/90000" };
     let mut video = sdp.lines().skip_while(|line| !line.starts_with("m=video "));
     let mut media = video
         .next()
@@ -26,8 +28,11 @@ pub(crate) fn validate_answer(sdp: &str) -> Result<()> {
             .strip_prefix("a=rtpmap:")
             .and_then(|v| v.split_once(' '))
         {
-            h264 |= pt == payload && codec.eq_ignore_ascii_case("H264/90000");
+            h264 |= pt == payload && codec.eq_ignore_ascii_case(expected);
         }
+    }
+    if !h264 && lab_av1 {
+        return Err(Error::WebRtc("receptor não selecionou AV1 (laboratório)"));
     }
     if !h264 {
         return Err(Error::WebRtc(
@@ -333,5 +338,15 @@ a=fmtp:98 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f
         assert!(!audio_accepted("m=video 9 X 1\r\nm=audio 0 X 111\r\n"));
         assert!(!audio_accepted("m=audio 9 X 111\r\na=inactive\r\n"));
         assert!(!audio_accepted("m=video 9 X 1\r\n"));
+    }
+
+    #[test]
+    fn answer_codec_matches_the_encoder() {
+        let h264 = "m=video 9 UDP/TLS/RTP/SAVPF 102\r\na=rtpmap:102 H264/90000\r\n";
+        let av1 = "m=video 9 UDP/TLS/RTP/SAVPF 45\r\na=rtpmap:45 AV1/90000\r\n";
+        assert!(validate_answer(h264, false).is_ok());
+        assert!(validate_answer(av1, false).is_err());
+        assert!(validate_answer(av1, true).is_ok());
+        assert!(validate_answer(h264, true).is_err());
     }
 }

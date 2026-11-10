@@ -215,6 +215,23 @@ impl Session {
             ._factory
             .get_rtp_sender_capabilities(MediaType::Video)
             .codecs;
+        if config.lab_av1 {
+            codecs.retain(|c| {
+                c.mime_type.eq_ignore_ascii_case("video/AV1")
+                    || c.mime_type.eq_ignore_ascii_case("video/rtx")
+            });
+            if !codecs
+                .iter()
+                .any(|c| c.mime_type.eq_ignore_ascii_case("video/AV1"))
+            {
+                return Err(Error::WebRtc("AV1 indisponível no libwebrtc"));
+            }
+            transceiver.set_codec_preferences(codecs).map_err(|error| {
+                tracing::error!(%error, "libwebrtc rejeitou as preferências AV1");
+                Error::WebRtc("restringindo codecs do transceiver")
+            })?;
+            return Ok(transceiver);
+        }
         if !codecs
             .iter()
             .any(|c| c.mime_type.eq_ignore_ascii_case("video/H264"))
@@ -402,7 +419,7 @@ impl Session {
             .await?;
         self.generation = started.generation;
         let result = async {
-            sdp::validate_answer(&started.answer)?;
+            sdp::validate_answer(&started.answer, config.lab_av1)?;
             if audio_transceiver.is_some() && !sdp::audio_accepted(&started.answer) {
                 // Sem áudio é melhor que sem transmissão: segue só com o vídeo.
                 tracing::warn!("SFU recusou a faixa de áudio; transmitindo só o vídeo");
@@ -493,6 +510,7 @@ struct Media {
 struct Shared {
     media: Mutex<Media>,
     resolution: VideoResolution,
+    codec: EncodedVideoCodec,
     pushed: AtomicU64,
     rejected: AtomicU64,
     keepalives: AtomicU64,
@@ -506,12 +524,13 @@ struct Shared {
 fn capture(
     source: &NativeVideoSource,
     resolution: &VideoResolution,
+    codec: EncodedVideoCodec,
     au: &[u8],
     keyframe: bool,
     timestamp_us: i64,
 ) -> bool {
     source.capture_encoded_frame(&EncodedVideoFrame {
-        codec: EncodedVideoCodec::H264,
+        codec,
         payload: au,
         timestamp_us,
         frame_type: if keyframe {
@@ -528,10 +547,16 @@ impl Shared {
     fn push(&self, au: &[u8], keyframe: bool, timestamp_us: i64) -> bool {
         let mut media = lock(&self.media);
         let timestamp_us = timestamp_us.max(media.last_timestamp_us.saturating_add(1));
-        let accepted = media
-            .session
-            .as_ref()
-            .is_some_and(|s| capture(&s.source, &self.resolution, au, keyframe, timestamp_us));
+        let accepted = media.session.as_ref().is_some_and(|s| {
+            capture(
+                &s.source,
+                &self.resolution,
+                self.codec,
+                au,
+                keyframe,
+                timestamp_us,
+            )
+        });
         if accepted {
             self.pushed.fetch_add(1, Ordering::Relaxed);
             media.last_timestamp_us = timestamp_us;
@@ -572,6 +597,7 @@ impl Shared {
         if capture(
             &session.source,
             &self.resolution,
+            self.codec,
             &cache.keyframe,
             true,
             timestamp_us,
@@ -681,6 +707,11 @@ impl CloudflarePublisher {
             resolution: VideoResolution {
                 width: config.width,
                 height: config.height,
+            },
+            codec: if config.lab_av1 {
+                EncodedVideoCodec::AV1
+            } else {
+                EncodedVideoCodec::H264
             },
             pushed: AtomicU64::new(0),
             rejected: AtomicU64::new(0),

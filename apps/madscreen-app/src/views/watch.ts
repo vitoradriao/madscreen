@@ -19,7 +19,14 @@ export function createWatchView(onExpand: () => void, onAdd?: () => void): Watch
     onExpand();
     panel.root.focus({ preventScroll: true });
   });
-  const compact = el("aside", { class: "watch-compact", hidden: true }, expand);
+  const collapse = el("button", { class: "btn ghost sm", type: "button", textContent: "Recolher player" });
+  collapse.setAttribute("aria-expanded", "true");
+  const compact = el("aside", { class: "watch-compact", hidden: true }, el("div", { class: "watch-compact-head row" }, expand, collapse));
+  collapse.addEventListener("click", () => {
+    const folded = compact.classList.toggle("collapsed");
+    collapse.textContent = folded ? "Mostrar vídeo" : "Recolher player";
+    collapse.setAttribute("aria-expanded", String(!folded));
+  });
   compact.setAttribute("aria-label", "Transmissão em reprodução");
   const panel = createWatchLayout(client, {
     ...(onAdd ? { onAdd } : {}),
@@ -37,7 +44,7 @@ export function createWatchView(onExpand: () => void, onAdd?: () => void): Watch
     { class: "empty-main fade-in" },
     svg(icon("monitor")),
     el("h2", {}, "Escolha uma transmissão ao vivo"),
-    el("p", { class: "small", textContent: "Abra um canal em Servidores e use o botão Assistir de uma transmissão." }),
+    el("p", { class: "small", textContent: "Escolha um canal na barra de cima e use Assistir na live de um amigo." }),
   );
   if (onAdd) {
     const browse = el("button", { class: "btn primary", type: "button", textContent: "Explorar canais" });
@@ -70,6 +77,7 @@ export function createWatchView(onExpand: () => void, onAdd?: () => void): Watch
     hide: () => {
       visible = false;
       if (started) {
+        for (const help of panel.root.querySelectorAll<HTMLDetailsElement>(".watch-diagnostics")) help.open = false;
         compact.append(panel.root);
         compact.hidden = false;
       }

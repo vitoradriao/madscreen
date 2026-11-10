@@ -49,7 +49,7 @@ export function createSfuAdminPanel(client: Pick<MadClient, "request">) {
           : "Não foi possível determinar se a troca por consumo está ativa.";
       summary.replaceChildren(
         el("div", { class: "version" }, el("div", { class: "grow" }, el("span", { class: "small muted" }, "Novas transmissões"), el("b", {}, providerName(status.provider)))),
-        el("p", { class: "small muted" }, `Uso estimado da Cloudflare: ${(used / 1e9).toFixed(2)} GB de ${(status.usage.quotaBytes / 1e9).toFixed(0)} GB. ${budget} Reinício do ciclo: ${new Date(status.usage.resetsAt).toLocaleDateString("pt-BR", { timeZone: "UTC" })} (UTC).`),
+        el("p", { class: "small muted" }, `Uso estimado da Cloudflare: ${(used / 1e9).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} GB de ${(status.usage.quotaBytes / 1e9).toLocaleString("pt-BR", { maximumFractionDigits: 0 })} GB. ${budget} Reinício do ciclo: ${new Date(status.usage.resetsAt).toLocaleDateString("pt-BR", { timeZone: "UTC" })} (UTC).`),
         (() => {
           const progress = el("progress", { class: "usage-meter", max: Math.max(1, status.usage.quotaBytes), value: Math.max(0, used) });
           progress.setAttribute("aria-label", "Uso estimado da Cloudflare neste ciclo");

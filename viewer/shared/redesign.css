@@ -22,9 +22,9 @@
 .context-actions .menu-item:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .context-actions .menu-item:disabled { opacity: var(--disabled); cursor: default; background: transparent; }
 .context-actions .menu-sep { border: 0; }
-.context-actions .server-join > summary > :last-child { margin-inline-start: auto; }
-.context-actions .server-join > form { padding: 0 var(--sp-3) var(--sp-1); }
-.context-actions .server-join .btn { justify-self: end; }
+.context-actions .menu-label { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3) 0; font-size: var(--fs-sm); font-weight: 600; color: var(--text); }
+.context-actions .join-form { padding: 0 var(--sp-3) var(--sp-2); }
+.context-actions .join-form .join-submit { justify-self: end; }
 .rail-account { appearance: none; border: 0; background: transparent; padding: var(--sp-1); border-radius: var(--r-pill); cursor: pointer; }
 .rail-account[aria-current="true"] { outline: 2px solid var(--accent); outline-offset: 2px; }
 .server-navigation.topbar { grid-column: 2 / -1; grid-row: 1; position: relative; flex-direction: row; align-items: center; align-content: normal; gap: var(--sp-4); min-height: var(--topbar-h); max-height: none; padding: 0 var(--sp-6); border: 0; border-bottom: 1px solid var(--border); background: var(--bg); overflow: visible; z-index: 10; }
@@ -136,7 +136,11 @@
 .watch-view .watch-panel { grid-template-rows: auto minmax(0, 1fr); }
 .watch-panel-head { justify-content: flex-end; }
 .player-top .who h2 { font-size: var(--fs-lg); font-weight: 600; margin: 0; }
-.player-top { z-index: 2; pointer-events: none; }
+.player-top { z-index: 2; pointer-events: none; opacity: 1; }
+.player-top > .btn { pointer-events: auto; }
+.player-top .who { overflow: hidden; }
+.player-top .who h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.watch-panel-head:not(:has(button:not([hidden]))) { display: none; }
 .stage .controls { z-index: 2; left: 0; right: 0; bottom: 0; max-width: none; padding: var(--sp-4); padding-top: var(--sp-6); background: linear-gradient(transparent, var(--scrim)); justify-content: flex-end; }
 .stage .audio-ctl { margin-right: auto; }
 .stage .player-stats { color: var(--text-2); font-size: var(--fs-xs); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -144,28 +148,87 @@
 .stage .controls > .btn, .stage .audio-ctl { background: var(--surface-2); }
 .stage .audio-ctl .volume { width: 96px; opacity: 1; }
 .stage .audio-unlock { z-index: 3; }
-.watch-panel:has(> .watch-diagnostics[open]) { grid-template-columns: minmax(0, 1fr) 320px; }
-.watch-panel:has(> .watch-diagnostics[open]) > .watch-diagnostics { grid-column: 2; grid-row: 1 / -1; max-height: none; padding: var(--sp-4); border-left: 1px solid var(--border); background: var(--bg-sidebar); overflow: auto; }
-.watch-panel:has(> .watch-diagnostics[open]) > .watch-diagnostics summary { font-size: var(--fs-lg); color: var(--text); }
-.watch-panel:has(> .watch-diagnostics[open]) > .watch-panel-head { grid-column: 1; }
-.watch-panel > .watch-diagnostics:not([open]) { display: none; }
+.watch-layout { position: relative; }
+.watch-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--sp-2); }
+.watch-selector { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.watch-help-host { position: absolute; inset: 0 0 0 auto; width: min(360px, 100%); z-index: 12; }
+.watch-diagnostics:not([open]) { display: none; }
+.watch-layout .watch-help-host > .watch-diagnostics[open],
+.watch-panel > .watch-diagnostics[open], .stage > .watch-diagnostics[open] {
+  display: block; padding: var(--sp-4); border: 1px solid var(--border-strong); border-radius: var(--r-md); background: var(--bg-sidebar); max-height: 100%; overflow: auto; color: var(--text);
+}
+.watch-layout .watch-help-host > .watch-diagnostics[open] { height: 100%; }
+.watch-panel > .watch-diagnostics[open], .stage > .watch-diagnostics[open] { position: absolute; inset: 0 0 0 auto; width: min(360px, 100%); z-index: 12; }
+.watch-diagnostics > summary { font-size: var(--fs-lg); font-weight: 600; }
+.watch-help-actions { margin-top: var(--sp-3); flex-wrap: wrap; }
+.watch-technical { border-top: 1px solid var(--border); padding-top: var(--sp-3); }
+.watch-technical > :not(summary) { margin-top: var(--sp-3); }
+.watch-action-error { position: absolute; z-index: 4; inset: auto var(--sp-4) 72px; padding: var(--sp-3); background: var(--overlay); color: var(--on-video); border: 1px solid var(--border-strong); border-radius: var(--r-sm); }
+.watch-compact-head { justify-content: space-between; flex-wrap: wrap; gap: var(--sp-1); }
+.watch-compact .watch-toolbar { display: none; }
+.watch-compact.collapsed .watch-layout { gap: 0; }
+.watch-compact.collapsed .watch-grid, .watch-compact.collapsed .watch-layout-actions, .watch-compact.collapsed .watch-layout > p { display: none; }
+.watch-compact.collapsed .watch-toolbar { display: flex; }
+.watch-compact.collapsed .watch-selector { padding: var(--sp-1) var(--sp-2); min-height: var(--control-h-sm); }
+.settings-panel { min-width: 0; }
+.settings-view .settings-panel > .card { padding: var(--sp-5); border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-1); }
+@media (min-width: 680px) and (max-height: 620px) {
+  .watch-layout .watch-grid.split { grid-template-columns: minmax(0, var(--split-a, 1fr)) var(--sp-4) minmax(0, var(--split-b, 1fr)); grid-template-rows: minmax(0, 1fr); }
+  .watch-layout .watch-divider:not([hidden]) { cursor: col-resize; }
+  .watch-layout .watch-divider::after { width: 4px; height: 48px; max-width: none; }
+  /* O compacto tem 340 px: lado a lado deixaria as duas telas ilegíveis, então continua empilhado. */
+  .watch-compact .watch-layout .watch-grid.split { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
+}
 .watch-compact .watch-layout > .row, .watch-compact .watch-layout > p, .watch-compact .watch-panel-head, .watch-compact .watch-diagnostics { display: none; }
 .watch-compact .stage { grid-row: auto; aspect-ratio: 16 / 9; }
 .watch-slot.selected .stage { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Uma moldura por tela marcada; com uma live só não há o que marcar. */
+.watch-grid.split .watch-slot.selected { border-color: transparent; }
+.watch-grid:not(.split) .watch-slot.selected .stage { outline: none; }
+.watch-selector[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.watch-selector[aria-pressed="true"]:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.watch-layout-actions .btn[aria-pressed="true"] { background: var(--surface-4); border-color: var(--text-2); }
+/* Quem está na tela vem antes do estado do som quando falta espaço. */
+.player-top .who h2 { flex: 0 1 auto; }
+.player-top .who > .badge { flex: none; }
+.player-top .who > span:not(.badge) { flex: 0 1000 auto; min-width: 0; }
+.watch-compact .player-top .who > span:not(.badge) { display: none; }
+/* A ajuda cobre só a área das telas: a barra de troca e destaque continua acessível. */
+.watch-grid { position: relative; }
+.watch-help-host[data-side="start"] { inset: 0 auto 0 0; }
+/* Em tela cheia, a ajuda flutua entre o nome e os controles, sem esconder Sair nem a saída da tela cheia. */
+.stage > .watch-diagnostics[open] { inset: 64px var(--sp-4) 72px auto; width: min(360px, calc(100% - var(--sp-4) * 2)); max-height: none; box-shadow: var(--shadow-floating); }
+.stage { container-type: inline-size; }
+@container (max-width: 620px) { .stage .player-stats { display: none; } }
+@container (max-width: 440px) { .stage .audio-ctl .volume { width: 48px; } .stage .controls { flex-wrap: nowrap; gap: var(--sp-1); padding-inline: var(--sp-2); } }
+.watch-view .watch-panel > .popout-placeholder { grid-row: 2; }
+.popout-placeholder { position: static; display: grid; place-items: center; align-content: center; gap: var(--sp-3); min-height: 160px; height: 100%; padding: var(--sp-5); text-align: center; color: var(--text-2); font-size: var(--fs-sm); border: 1px dashed var(--border-strong); border-radius: var(--r-lg); }
+.settings-panel [tabindex="-1"]:focus { outline: none; }
+.settings-view { scroll-margin-top: var(--sp-6); }
 .login-body { width: min(1100px, 100%); grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); }
 .login-brand { gap: var(--sp-3); font-weight: 600; }
 .display { font-size: var(--fs-display); font-weight: 600; line-height: 1.08; letter-spacing: -0.03em; }
 .update-notice { width: min(340px, calc(100vw - var(--sp-6))); }
 .auth-card { padding: var(--sp-6); }
 .auth-flow { display: flex; flex-direction: column; gap: var(--sp-5); }
-.auth-flow.alternative > .auth-fallback { order: 1; }
-.auth-flow.alternative > .auth-oauth { order: 2; }
-.auth-flow.alternative > .auth-oauth::before { content: "ou"; text-align: center; text-transform: uppercase; font-size: var(--fs-xs); color: var(--text-3); }
+/* A ordem visual vem do DOM (ui.ts reordena ao abrir "Entrar sem Discord"), nunca de `order`. */
+.auth-flow.alternative > .auth-oauth::before { content: "ou"; text-align: center; font-size: var(--fs-sm); color: var(--text-2); }
 .auth-flow.alternative > .stack:first-child { display: none; }
-.auth-flow.alternative > .alerts, .auth-flow.alternative > .stack:last-child { order: 3; }
-.auth-fallback > summary { cursor: pointer; font-weight: 600; }
+.auth-fallback > summary { cursor: pointer; font-weight: 600; min-height: 36px; display: flex; align-items: center; gap: var(--sp-2); text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 4px; }
+.auth-fallback > summary:hover { text-decoration-color: currentColor; }
 .auth-invite { font-size: var(--fs-sm); }
-.recovery-key { user-select: all; }
+.auth-why { color: var(--text-2); }
+.auth-card p, .login-body .lead, .empty-main p, .server-dialog p, .invite-landing p { text-wrap: pretty; }
+.display, .auth-card h2, .empty-main h2, .invite-landing h1 { text-wrap: balance; }
+.recovery-key { user-select: all; border-style: dashed; }
+/* Títulos recebem foco só por script (tabindex -1) para anunciar a etapa; não são controles e não ganham contorno. */
+.recovery-notice > h2:focus { outline: none; }
+.recovery-notice .check, .recovery-settings .check { align-items: center; }
+.recovery-settings h4 { font-size: var(--fs-md); }
+.empty-start { max-width: 52ch; margin-inline: auto; }
+.empty-start .join-form { width: min(380px, 100%); text-align: start; }
+.empty-start .join-form .join-submit { justify-self: end; }
+.empty-actions { justify-content: center; flex-wrap: wrap; }
 .badge { height: 24px; font-size: var(--fs-2xs); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; background: transparent; }
 .banner.error { border: 2px solid var(--text); }
 .login-body .lead { margin-top: var(--sp-4); font-size: var(--fs-lg); }
@@ -181,24 +244,26 @@
 @media (max-width: 960px) {
   .server-title-menu > summary { max-width: 140px; }
   .channel-actions > [data-focuskey="invite"] { font-size: 0; padding-inline: var(--sp-2); }
+  /* Abaixo de 960 px a coluna de membros tomaria o espaço dos canais: vira painel sobreposto.
+     Sem posição na grade, o bloco de referência é a área inteira e não uma coluna implícita de largura zero. */
+  .server-workspace { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
+  .server-workspace > .server-members { grid-column: auto; grid-row: auto; position: absolute; right: 0; top: var(--topbar-h); bottom: 0; width: min(var(--members-w), calc(100% - var(--rail-w))); box-shadow: var(--shadow-floating); }
+  .server-workspace:has(> .server-members:not([hidden])) > .server-navigation { grid-column: 2; }
 }
 @media (max-width: 850px) {
-  .server-workspace { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
-  .server-workspace > .server-members { position: absolute; right: 0; top: var(--topbar-h); bottom: 0; width: min(var(--members-w), calc(100% - var(--rail-w))); box-shadow: var(--shadow-floating); }
-  .server-workspace:has(> .server-members:not([hidden])) > .server-navigation { grid-column: 2; }
   .channel-main, .server-page, .server-page.watching { padding: var(--sp-4); }
   .channel-actions > .channel-share { font-size: var(--fs-xs); padding-inline: var(--sp-2); }
   .server-navigation .channel-pick { padding-inline: var(--sp-2); }
   .settings-layout { grid-template-columns: minmax(0, 1fr); }
   .settings-nav { position: static; display: flex; flex-wrap: wrap; }
-  .watch-panel:has(> .watch-diagnostics[open]) { grid-template-columns: minmax(0, 1fr); }
-  .watch-panel:has(> .watch-diagnostics[open]) > .watch-diagnostics { grid-column: 1; grid-row: 3; max-height: 220px; border: 1px solid var(--border); }
 }
 @media (max-width: 600px) {
   .server-navigation.topbar { gap: var(--sp-1); padding-inline: var(--sp-2); }
   .server-title-menu > summary { font-size: var(--fs-sm); max-width: 100px; overflow: hidden; }
   .channel-actions { gap: var(--sp-1); }
-  .channel-share .icon { display: none; }
+  /* O nome do canal precisa caber: Compartilhar tela fica só com o ícone (o texto segue como nome acessível) */
+  .channel-actions > .channel-share { font-size: 0; gap: 0; padding-inline: var(--sp-2); }
+  .server-navigation.topbar > nav { min-width: 96px; }
   .login-body { grid-template-columns: minmax(0, 1fr); }
   .share-step { padding: var(--sp-3); grid-template-columns: 28px minmax(0, 1fr); gap: var(--sp-2); }
   .res-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

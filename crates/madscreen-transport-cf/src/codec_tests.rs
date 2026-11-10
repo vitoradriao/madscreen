@@ -47,7 +47,7 @@ async fn native_h264_preferences_and_local_offer_accept_encoder_levels() -> Resu
             // O SFU pode devolver o nível solicitado, superior ao nível nativo anunciado
             // nas capacidades. Isso também precisa passar em set_remote_description.
             let answer_sdp = sdp::raise_h264_level(&answer.to_string(), level)?;
-            sdp::validate_answer(&answer_sdp)?;
+            sdp::validate_answer(&answer_sdp, false)?;
             receiver
                 .set_local_description(SessionDescription::parse(&answer_sdp, SdpType::Answer)?)
                 .await?;

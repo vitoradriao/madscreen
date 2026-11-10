@@ -440,6 +440,21 @@ export class HubDO extends DurableObject<Env> {
     return this.view(this.require(uid));
   }
 
+  /** Conta criada com nome de usuário entra com chave de recuperação; conta de Discord/Google não. */
+  async hasRecoveryKey(uid: string): Promise<boolean> {
+    return this.require(uid).recovery_hash !== null;
+  }
+
+  /** Troca a chave de recuperação de quem está conectado. A chave antiga deixa de valer na hora. */
+  async rotateRecoveryKey(uid: string): Promise<string> {
+    const user = this.require(uid);
+    if (!user.recovery_hash) throw new ApiError(409, "sem_chave", "Esta conta entra pelo Discord ou Google e não usa chave de recuperação.");
+    await this.rateLimit(`recovery:${uid}`, 5, 3600);
+    const recoveryKey = [randomCode(5), randomCode(5), randomCode(5), randomCode(5)].join("-");
+    this.sql.exec("UPDATE users SET recovery_hash = ? WHERE id = ?", await hashSecret(recoveryKey), uid);
+    return recoveryKey;
+  }
+
   async updateMe(uid: string, displayInput: unknown): Promise<UserView> {
     this.require(uid);
     if (typeof displayInput !== "string" || !displayInput.trim() || displayInput.length > 40) invalidBody();

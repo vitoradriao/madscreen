@@ -7,3 +7,10 @@
 /apps/madscreen-app/src-tauri/encoder-runtime/
 /apps/madscreen-app/src-tauri/windows/branding/madscreen-theme.dll
 __pycache__/
+
+# Impeccable (npx impeccable install): skills, agentes e hooks locais
+/.claude/skills/impeccable/
+/.claude/agents/impeccable-*.md
+/.github/skills/impeccable/
+/.github/agents/impeccable-*.agent.md
+/.github/hooks/impeccable.json

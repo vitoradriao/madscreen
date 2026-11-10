@@ -1,4 +1,7 @@
 #![allow(unsafe_code)]
+use super::reduction::{
+    ReductionFilter, ReductionPreference, reduction_filter, validate_preference,
+};
 use super::{ConvertMode, InputFormat};
 use crate::{EncodeError, Result, platform};
 use madscreen_capture::{
@@ -488,6 +491,9 @@ pub struct Converter {
     query_deadlines: Vec<std::cell::Cell<Option<std::time::Instant>>>,
     size: (u32, u32),
     mode: ConvertMode,
+    source_size: (u32, u32),
+    reduction_preference: ReductionPreference,
+    reduction_filter: ReductionFilter,
 }
 impl Converter {
     pub fn new(
@@ -579,7 +585,7 @@ impl Converter {
                 }
             }
         };
-        Ok(Self {
+        let mut converter = Self {
             gpu: gpu.clone(),
             textures,
             backend,
@@ -595,24 +601,67 @@ impl Converter {
             query_active: vec![std::cell::Cell::new(false); slots],
             size,
             mode: effective,
+            source_size,
+            reduction_preference: ReductionPreference::Automatic,
+            reduction_filter: ReductionFilter::Bilinear,
+        };
+        converter.update_reduction(source_size);
+        Ok(converter)
+    }
+    /// Opt-in estrito do laboratório: sem shader, falha para não falsear o A/B.
+    pub fn set_box_reduction(&mut self, enabled: bool) -> Result<()> {
+        self.set_reduction_preference(if enabled {
+            ReductionPreference::Box4x4
+        } else {
+            ReductionPreference::Bilinear
         })
     }
-    /// Opt-in supersampled box reduction. The VideoProcessor baseline is explicit.
-    pub fn set_box_reduction(&mut self, enabled: bool) -> Result<()> {
+    /// Aplicar ao abrir a sessão; o filtro será recalculado se a fonte mudar.
+    pub fn set_reduction_preference(&mut self, preference: ReductionPreference) -> Result<()> {
+        validate_preference(preference, self.mode == ConvertMode::Shader)?;
+        self.reduction_preference = preference;
+        self.update_reduction(self.source_size);
+        Ok(())
+    }
+    pub fn reduction_filter(&self) -> ReductionFilter {
+        self.reduction_filter
+    }
+    fn update_reduction(&mut self, source: (u32, u32)) {
+        self.source_size = source;
+        let desired = reduction_filter(source, self.size, self.reduction_preference, true);
+        self.reduction_filter = reduction_filter(
+            source,
+            self.size,
+            self.reduction_preference,
+            self.mode == ConvertMode::Shader,
+        );
+        if self.reduction_preference == ReductionPreference::Automatic
+            && desired == ReductionFilter::Box4x4
+            && self.reduction_filter == ReductionFilter::VideoProcessor
+        {
+            static BOX_FALLBACK_WARNING: std::sync::Once = std::sync::Once::new();
+            BOX_FALLBACK_WARNING.call_once(|| {
+                tracing::warn!("Filtro box indisponível no driver; mantendo VideoProcessor");
+            });
+        }
+        let enabled = self.reduction_filter == ReductionFilter::Box4x4;
+        // convert.hlsl Params.unused: bit0 ativa box; bit1 recompõe tamanho UV.
+        const BOX_FILTER_BIT: u32 = 1;
+        const CHROMA_SIZE_BIT: u32 = 2;
         match &mut self.backend {
             Backend::Shader { y, uv, .. } => {
-                y.filter_mode = u32::from(enabled);
-                uv.filter_mode = if enabled { 3 } else { 0 };
+                y.filter_mode = if enabled { BOX_FILTER_BIT } else { 0 };
+                uv.filter_mode = if enabled {
+                    BOX_FILTER_BIT | CHROMA_SIZE_BIT
+                } else {
+                    0
+                };
             }
-            Backend::Bgra { pass, .. } => pass.filter_mode = u32::from(enabled),
-            Backend::VideoProcessor(_) if enabled => {
-                return Err(EncodeError::InvalidConfig(
-                    "filtro box indisponivel no VideoProcessor",
-                ));
+            Backend::Bgra { pass, .. } => {
+                pass.filter_mode = if enabled { BOX_FILTER_BIT } else { 0 }
             }
             _ => {}
         }
-        Ok(())
     }
     pub fn textures(&self) -> &[ID3D11Texture2D] {
         &self.textures
@@ -629,6 +678,9 @@ impl Converter {
             return Err(EncodeError::InvalidConfig(
                 "somente SDR BGRA8; desligue HDR",
             ));
+        }
+        if self.source_size != frame.size {
+            self.update_reduction(frame.size);
         }
         let r = even_rect(frame.size, self.size);
         match &mut self.backend {

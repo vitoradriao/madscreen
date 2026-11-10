@@ -30,20 +30,28 @@ export async function checkShareFlow(check: (condition: unknown, name: string) =
     view.updateDirectory({ servers: [{ id: "server", name: "Teste", channels: [{ id: "channel", name: "Geral" }] }] } as any);
     await flush();
     check(view.root.querySelectorAll('.share-step').length === 3 && button("Compartilhar tela").disabled && !view.root.querySelector<HTMLDetailsElement>('.share-diagnostics')!.open, "Três passos visíveis; compartilhar exige fonte e diagnóstico começa recolhido");
+    check(view.root.querySelector<HTMLElement>('.share-stage')!.hidden && view.root.querySelector<HTMLDetailsElement>('.share-quality')!.hidden,
+      "Preparação não reserva espaço para uma prévia desligada nem expõe opções de qualidade prematuramente");
     button("Escolher janela ou tela").click();await flush();
     (window as any).pickerUiHtml=document.querySelector('.pk-overlay')!.outerHTML;
     document.querySelector<HTMLButtonElement>('.pk-close')!.click();await flush();
     check(starts.length === 0 && !document.querySelector('.pk-overlay') && button("Compartilhar tela").disabled, "Cancelar primeira escolha mantém Compartilhar desabilitado e não transmite");
     button("Escolher janela ou tela").click();await flush();
     pickButton("Telas").click();await flush();
+    check(!!(document.querySelector('.pk-audio')!.compareDocumentPosition(document.querySelector('.pk-body')!) & Node.DOCUMENT_POSITION_FOLLOWING),
+      "Som aparece antes das fontes na ordem visual e de teclado");
     const system = [...document.querySelectorAll<HTMLLabelElement>('.pk-check')].find(item => item.textContent?.includes("Som do PC todo"))!.querySelector('input')!;
-    system.checked = true; system.dispatchEvent(new Event('change'));await flush();
+    system.focus();system.checked = true; system.dispatchEvent(new Event('change'));await flush();
+    check(document.activeElement === document.querySelector('.pk-audio input'), "Alterar Som do PC todo mantém o foco no controle e dentro do seletor");
+    check(document.querySelector('.pk-foot')?.textContent?.includes("revisar e confirmar"), "Escolha comum explica que a fonte será revisada antes de transmitir");
     document.querySelector<HTMLButtonElement>('.pk-card')!.click();await flush();
     check(starts.length === 0 && view.root.textContent?.includes("Som do PC todo, exceto o madscreen") && !view.root.querySelector<HTMLDetailsElement>('.share-quality')!.hidden, "Fonte e som selecionados aparecem antes da confirmação, sem iniciar captura");
     (window as any).shareReviewHtml = view.root.outerHTML;
-    check(view.root.querySelector<HTMLDetailsElement>('.share-quality')!.open && view.root.querySelector('[role="radiogroup"][aria-label="Taxa de quadros"]')?.textContent?.includes('60 FPS'), "Resolução e FPS ficam expostos após selecionar a fonte");
+    check(!view.root.querySelector<HTMLDetailsElement>('.share-quality')!.open && view.root.textContent?.includes('Qualidade: 1080p · 60 FPS'), "Resumo confirma a qualidade sem exigir configurar resolução e FPS a cada transmissão");
+    view.root.querySelector<HTMLDetailsElement>('.share-quality')!.open = true;
+    check(view.root.querySelector('[role="radiogroup"][aria-label="Taxa de quadros"]')?.textContent?.includes('60 FPS'), "Alterar qualidade mantém resolução e FPS disponíveis sob demanda");
     const diagnosticButton=button('Copiar diagnóstico da transmissão');
-    check(!diagnosticButton.closest('details'), 'Copiar diagnóstico permanece no cabeçalho fora das seções recolhidas');
+    check(!diagnosticButton.closest('details') && !diagnosticButton.closest('header'), 'Copiar diagnóstico continua acessível em uma região secundária fora das seções recolhidas');
     diagnosticButton.click();await flush();
     check(JSON.parse(copiedDiagnostic).schema===1,'Copiar diagnóstico da transmissão usa o relatório real do contrato IPC');
     button("Trocar fonte ou som").click();await flush();
@@ -51,6 +59,14 @@ export async function checkShareFlow(check: (condition: unknown, name: string) =
     check(view.root.textContent?.includes("Tela 1") && view.root.textContent?.includes("Som do PC todo"), "Cancelar troca antes de iniciar preserva fonte e escolha de som");
     button("Compartilhar").click();await flush();
     check(starts.length === 1 && starts[0].source.kind === "monitor" && starts[0].audio.system === true && starts[0].channelId === "channel", "Confirmação transmite fonte, som e canal escolhidos usando contrato existente");
+    view.update({ phase: "starting", publishing: false } as any);
+    view.update({ phase: "idle", publishing: false, message: "Falha de conexão. Tente novamente.", message_is_error: true } as any);
+    await flush();
+    check(starts.length === 1 && view.root.textContent?.includes("Tela 1") && view.root.textContent?.includes("Som do PC todo")
+      && !button("Tentar novamente").disabled, "Falha ao iniciar preserva fonte e som e oferece nova tentativa sem transmitir sozinha");
+    button("Tentar novamente").click();await flush();
+    check(starts.length === 2 && starts[1].source.kind === "monitor" && starts[1].audio.system === true && starts[1].channelId === "channel",
+      "Nova tentativa usa a fonte, o som e o canal revisados");
     const liveState: any = { phase:"live", session_id:1, width:1280, height:720, source_width:1920, source_height:1080,
       quality_height:720, fps:60, fps_target:60, bitrate_bps:1000000, bitrate_target_bps:1000000, audio_active:1,
       publishing:false, privacy_supported:true, privacy_video:"active", privacy_pending:false };
@@ -71,6 +87,8 @@ export async function checkShareFlow(check: (condition: unknown, name: string) =
     check(privacy[2].pause===false && privacy[2].muted===null, "Retomada exige ação explícita");
     view.update({...liveState,privacy_supported:false});
     check(button("Pausar vídeo").disabled, "Engine antigo não oferece pausa sem suporte confirmado");
+    view.update({...liveState,phase:"stopping"});view.update({...liveState,phase:"idle"});await flush();
+    check(button("Compartilhar tela").disabled && view.root.textContent?.includes("Nenhuma fonte selecionada"), "Encerramento normal continua limpando a fonte e exige nova escolha");
     view.dispose?.();view.root.remove();
     const quick = createShareView();document.body.append(quick.root);
     try {
@@ -78,14 +96,14 @@ export async function checkShareFlow(check: (condition: unknown, name: string) =
       quick.startInChannel(destination);await flush();
       check(document.querySelector('.pk-foot')?.textContent?.includes("qualidade salva"), "Início pelo canal explica que escolher fonte inicia com qualidade salva");
       document.querySelector<HTMLButtonElement>('.pk-card')!.click();await flush();
-      check(starts.length === 2 && starts[1].source.kind === "window_handle" && starts[1].height === 1080 && starts[1].fps === 60, "Ação do canal e escolha da fonte mantêm caminho rápido sem nova confirmação");
+      check(starts.length === 3 && starts[2].source.kind === "window_handle" && starts[2].height === 1080 && starts[2].fps === 60, "Ação do canal e escolha da fonte mantêm caminho rápido sem nova confirmação");
     } finally { quick.dispose?.();quick.root.remove(); }
     const canceled = createShareView();document.body.append(canceled.root);
     try {
       canceled.updateDirectory({ servers: [{ id: "server", name: "Teste", channels: [{ id: "channel", name: "Geral" }] }] } as any);
       canceled.startInChannel(destination);await flush();
       canceled.cancelPending();await flush();
-      check(!document.querySelector('.pk-overlay') && starts.length === 2, "Logout ou updater aborta a escolha rápida sem transmissão tardia");
+      check(!document.querySelector('.pk-overlay') && starts.length === 3, "Logout ou updater aborta a escolha rápida sem transmissão tardia");
     } finally { canceled.dispose?.();canceled.root.remove(); }
   } finally {
     view.dispose?.();view.root.remove();

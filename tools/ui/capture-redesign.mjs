@@ -6,7 +6,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root=fileURLToPath(new URL('../../',import.meta.url));
-const out=path.join(root,'bench-results/redesign-2026-11-03');await mkdir(path.join(out,'prints'),{recursive:true});
+const out=path.resolve(root,process.env.MADSCREEN_UI_OUTPUT || 'bench-results/redesign-2026-11-03');await mkdir(path.join(out,'prints'),{recursive:true});
 const bundle=await build({entryPoints:[path.join(root,'tools/ui/redesign-fixture.ts')],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022',loader:{'.css':'empty'},alias:{'livekit-client':path.join(root,'viewer/tests/fake-sdk.mjs'),'@shared':path.join(root,'viewer/shared')},define:{'import.meta.env.VITE_MADSCREEN_URL':JSON.stringify('http://127.0.0.1')}});
 let css=await readCss(path.join(root,'viewer/shared/tokens.css'));
 css+='\n'+await readFile(path.join(root,'apps/madscreen-app/src/styles.css'),'utf8')+'\n'+await readFile(path.join(root,'apps/madscreen-app/src/views/picker.css'),'utf8')+'\n'+await readFile(path.join(root,'viewer/shared/redesign.css'),'utf8');
@@ -40,7 +40,7 @@ try{
   await reset();await act('demo.directory({servers:[]})');await capture('sem-servidor','Nenhum servidor','Conta nova ou sem participação em servidores.');
   await click('.server-add-menu > summary');await capture('adicionar-servidor','Adicionar servidor e convite','Barra da esquerda → +.');
   await reset();await click('.server-add-menu > summary');await click('[data-focuskey="server-create"]');await capture('criar-servidor','Criar servidor','+ → Criar servidor.');
-  await reset();await click('.server-add-menu > summary');await click('.server-join > summary');await capture('entrar-convite','Entrar por convite','+ → Entrar por convite → informar código ou link → Entrar.');
+  await reset();await click('.server-add-menu > summary');await capture('entrar-convite','Entrar com convite','+ → Entrar com convite → informar código ou link → Entrar.');
   await reset();await click('[data-focuskey="invite"]');await capture('convite','Convidar amigos','Canal → Convidar (ou Convidar amigos).','Link fictício sem validade.');
   await reset();await click('.server-title-menu > summary');await capture('menu-servidor','Menu do servidor','Nome do servidor → seta.','Ações variam conforme o papel de dono/admin/membro.');
   for(const [key,id,title] of [['server-rename','renomear-servidor','Renomear servidor'],['server-leave','sair-servidor','Sair do servidor'],['server-remove','apagar-servidor','Apagar servidor']]){await reset();await click('.server-title-menu > summary');await click(`[data-focuskey="${key}"]`);await capture(id,title,`Nome do servidor → ${title}.`,'Somente diálogo aberto; operação não confirmada.');}
@@ -61,15 +61,20 @@ try{
   await reset();await click('[data-focuskey="watch-bruno"]');await act('demo.tracks()');await capture('assistir-uma','Assistir a uma live','Canal Geral → Assistir na live de Bruno.','Player real com vídeo de canvas local; sem transmissão remota.');
   await textClick('Ajuda');await capture('assistir-ajuda','Ajuda e diagnóstico do player','Player → Ajuda.');
   await act("demo.page('servers')");await click('[data-focuskey="watch-dani"]');await act('demo.tracks()');await capture('assistir-duas','Assistir a duas lives','Com a primeira live aberta → canal Geral → Assistir em outra live.');
+  await textClick('Ajuda');await capture('duas-ajuda','Duas lives com ajuda','Assistir duas lives → Ajuda');await textClick('Fechar ajuda');
+  await textClick('Lado a lado');await capture('duas-lado-a-lado','Duas lives lado a lado','Assistir duas lives → Lado a lado');
   await textClick('Trocar destaque');await capture('assistir-destaque','Duas lives com destaque alternado','Assistir duas lives → Trocar destaque (atalho D).');
   await act("demo.page('servers')");await capture('player-compacto','Player compacto durante a navegação','Com live aberta → voltar a um canal.','Player compacto dentro do app; a janela nativa de mini-player é um fluxo separado.');
+  await textClick('Recolher player');await capture('player-recolhido','Player recolhido durante a navegação','Player compacto → Recolher player');await textClick('Mostrar vídeo');
   await reset();await act("demo.page('settings')");await capture('conta','Conta e preferências','Engrenagem ao lado do perfil, no rodapé da barra de canais.');
-  await act('demo.update(true)');await textClick('Verificar atualizações');await capture('atualizacao','Atualização disponível','Conta → Verificar atualizações.','Versão e recurso de atualização fictícios; nada baixado ou instalado.');
-  await act('demo.admin(true);demo.shell();demo.page("settings")');await capture('conta-admin','Conta com administração de serviço','Conta autorizada pelo backend → Conta → Serviço de transmissão.','Dados administrativos fictícios; não representa a configuração de produção.');
+  for(const [id,label] of [['aparencia','Aparência'],['avisos','Avisos'],['video','Reprodução de vídeo']]){await textClick(label);await capture('conta-'+id,'Conta — '+label,'Conta → '+label);}
+  await textClick('Atualizações');await act('demo.update(true)');await textClick('Verificar atualizações');await capture('atualizacao','Atualização disponível','Conta → Verificar atualizações.','Versão e recurso de atualização fictícios; nada baixado ou instalado.');
+  await act('demo.admin(true);demo.shell();demo.page("settings")');await textClick('Serviço de transmissão');await capture('conta-admin','Conta com administração de serviço','Conta autorizada pelo backend → Conta → Serviço de transmissão.','Dados administrativos fictícios; não representa a configuração de produção.');
   await reset();await act('demo.tray()');await capture('bandeja','Aviso de minimizar para bandeja','Primeiro fechamento da janela pelo X → aviso da bandeja.','Aviso real aberto diretamente em demonstração.');
   await reset();await click('[data-focuskey="watch-bruno"]');await act('demo.tracks()');
   await send('Input.dispatchMouseEvent',{type:'mouseMoved',x:1050,y:500});await act("document.querySelector('.stage .controls button').focus()");await capture('player-controles','Controles sobre o vídeo','Player → mover o cursor ou focar os controles do vídeo.','Vídeo fictício; controles exibidos por foco de teclado.');
   await send('Runtime.evaluate',{expression:"document.querySelector('.stage').requestFullscreen()",awaitPromise:true,userGesture:true});await capture('tela-cheia','Player em tela cheia','Player → Tela cheia ou atalho F.','Fullscreen real do Chrome; sem moldura nativa do Windows.');
+  await textClick('Ajuda');await capture('tela-cheia-ajuda','Ajuda em tela cheia','Tela cheia → Ajuda');if(!await evaluate('!!document.fullscreenElement'))throw Error('Ajuda saiu da tela cheia');await textClick('Fechar ajuda');
   await act('document.exitFullscreen()');
   await act('demoMini()');
   const targets=await send('Target.getTargets');const popup=targets.targetInfos.find(t=>t.type==='page'&&t.url.startsWith('about:blank#'));
@@ -79,13 +84,13 @@ try{
   await capture('mini-player','Mini-player em janela separada','Player → botão Mini-player → janela flutuante com Fixar, Controles e Voltar.','Componente real e popup do Chrome; comandos nativos de posicionamento Tauri simulados.',attached.sessionId);
   await capture('player-destacado','Janela principal com player destacado','Abrir Mini-player → voltar à janela principal sem fechar a janela flutuante.');
   await send('Target.closeTarget',{targetId:popup.targetId});
-  await reset();await act('demo.admin(true);demo.page("settings")');await act("document.querySelector('.server-page').scrollTop=99999");await capture('admin-detalhes','Serviço de transmissão: detalhes','Conta autorizada → Conta → rolar até Serviço de transmissão.','Serviço fictício; nenhum provedor real alterado.');
-  await act('demo.login()');await textClick('Entrar sem Discord');await textClick('Já tenho conta');await capture('login-chave','Entrar com chave de recuperação','Entrada → Entrar sem Discord → Já tenho conta → usuário e chave.');
+  await reset();await act('demo.admin(true);demo.page("settings")');await textClick('Serviço de transmissão');await act("document.querySelector('.server-page').scrollTop=99999");await capture('admin-detalhes','Serviço de transmissão: detalhes','Conta autorizada → Conta → rolar até Serviço de transmissão.','Serviço fictício; nenhum provedor real alterado.');
+  await act('demo.login()');await textClick('Entrar sem Discord');await textClick('Entrar com chave');await capture('login-chave','Entrar com chave de recuperação','Entrada → Entrar sem Discord → Entrar com chave → usuário e chave.');
   await reset();await act("demo.page('share');demo.shareState({})");await act("document.querySelector('.share-diagnostics').open=true;document.querySelector('.server-page').scrollTop=99999");await capture('diagnostico-rodape','Diagnóstico da transmissão: conteúdo completo','Minha transmissão → Detalhes e diagnóstico → rolar até o fim.','Estado e métricas fictícios, sem medição de desempenho.');
   // Verificação do produto nos três temas, sem sessões remotas.
   for(const [theme,label] of [['dark','Grafite'],['light','Papel'],['contrast','Alto contraste']]) {
     await reset();await act("demo.page('settings')");
-    await textClick(label);
+    await textClick('Aparência');await textClick(label);
     if(await evaluate('document.documentElement.dataset.theme')!==theme)throw Error('Tema não aplicado: '+theme);
     await capture('conta-'+theme,'Conta — '+label,'Avatar → Conta → Aparência → '+label);
     await act("demo.page('servers')");await capture('canal-'+theme,'Canal — '+label,'Conta → Aparência → '+label+' → voltar ao canal');
@@ -95,7 +100,7 @@ try{
     await capture('player-'+theme,'Player — '+label,'Assistir → mostrar controles no tema '+label);
     if(await evaluate('document.querySelector(".watch-panel video").srcObject.id')!==before)throw Error('Captura alterou mídia');
   }
-  await reset();await act("demo.page('settings')");await textClick('Grafite');
+  await reset();await act("demo.page('settings')");await textClick('Aparência');await textClick('Grafite');
   await reset();await act('demo.notice()');await capture('aviso-atualizacao','Aviso de atualização','Consulta encontra versão disponível; sem baixar ou instalar');
   await act("demo.page('share');demo.shareState({phase:'starting'})");await capture('iniciando','Iniciando transmissão','Estado do supervisor; Cancelar continua disponível');
   await act("demo.shareState({phase:'stopping'})");await capture('parando','Parando transmissão','Estado do supervisor');
@@ -104,9 +109,26 @@ try{
     await reset();
     const fits=await evaluate('document.documentElement.scrollWidth<=innerWidth');
     if(!fits)throw Error('Overflow horizontal em '+width);
+    if(await evaluate('(()=>{const m=document.querySelector(".server-members");return !!m&&!m.hidden&&m.getBoundingClientRect().width<200})()'))throw Error('Painel de membros espremido em '+width);
+    if(await evaluate('(document.querySelector(".channel-pick[aria-current=\\"true\\"]")?.getBoundingClientRect().width??0)<60'))throw Error('Nome do canal some em '+width);
     await capture('canal-'+width,'Canal em '+width+' px','Redimensionar janela');
     await act("demo.page('settings')");await capture('conta-'+width,'Conta em '+width+' px','Redimensionar janela → Conta');
   }
+  // Janela mínima do app (860×560): duas lives, troca da ajuda entre pessoas, player compacto e Conta.
+  await send('Emulation.setDeviceMetricsOverride',{width:860,height:560,deviceScaleFactor:1,mobile:false});
+  await reset();await click('[data-focuskey="watch-bruno"]');await act('demo.tracks()');
+  await act("demo.page('servers')");await click('[data-focuskey="watch-dani"]');await act('demo.tracks()');
+  if(await evaluate('document.documentElement.scrollWidth>innerWidth'))throw Error('Overflow horizontal em 860×560');
+  await capture('duas-860','Duas lives em 860×560','Janela mínima → Assistir duas lives.');
+  await click('[aria-label="Ajuda: Dani"]');
+  if(await evaluate('document.querySelector(".watch-help-host").dataset.side')!=='start')throw Error('Ajuda de Dani cobre a própria tela');
+  await capture('duas-ajuda-dani-860','Ajuda da Tela 2 em 860×560','Janela mínima → Ajuda de Dani: abre sobre a outra tela.');
+  await click('[aria-label="Ajuda: Bruno"]');
+  if(!(await evaluate('document.querySelector(".watch-help-host summary").textContent')).includes('Bruno'))throw Error('Ajuda não trocou de pessoa');
+  await capture('duas-ajuda-bruno-860','Ajuda trocada para a Tela 1 em 860×560','Com a ajuda de Dani aberta → Ajuda de Bruno.');
+  await textClick('Fechar ajuda');
+  await act("demo.page('servers')");await capture('player-compacto-860','Player compacto em 860×560','Janela mínima → voltar ao canal com duas lives.');
+  await act('demo.admin(true);demo.page("settings")');await textClick('Serviço de transmissão');await capture('conta-admin-860','Serviço de transmissão em 860×560','Janela mínima → Conta → Serviço de transmissão.','Dados fictícios.');
   await send('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false});
   if(errors.length)throw Error('Exceções na galeria: '+JSON.stringify(errors));
   await writeFile(path.join(out,'manifest.json'),JSON.stringify({capturedAt:new Date().toISOString(),viewport:[1280,800],source:'working tree local, production UI components with fictional backend/IPC/SDK',items},null,2));

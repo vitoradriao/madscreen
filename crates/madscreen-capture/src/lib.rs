@@ -20,8 +20,17 @@ pub enum CaptureBackend {
 
 /// Windows 11 também informa major=10; a build 22000 distingue o cliente.
 /// Versão desconhecida preserva WGC. Janelas nunca viram recortes de monitor.
-pub fn automatic_backend(target: CaptureTarget, version: Option<(u32, u32)>) -> CaptureBackend {
-    if matches!(target, CaptureTarget::Monitor(_)) && matches!(version, Some((10, 18362..22000))) {
+/// Monitor com HDR ativo usa WGC: a Desktop Duplication BGRA8 entrega o desktop HDR
+/// com brilho ~2x e estourado (medido em 7/nov/2026, #12); o WGC BGRA8 entrega o SDR correto.
+pub fn automatic_backend(
+    target: CaptureTarget,
+    version: Option<(u32, u32)>,
+    hdr_enabled: Option<bool>,
+) -> CaptureBackend {
+    if matches!(target, CaptureTarget::Monitor(_))
+        && matches!(version, Some((10, 18362..22000)))
+        && hdr_enabled != Some(true)
+    {
         CaptureBackend::DesktopDuplication
     } else {
         CaptureBackend::Wgc
@@ -290,10 +299,18 @@ mod tests {
         use super::{CaptureBackend::*, CaptureTarget::*, automatic_backend};
         for build in [18362, 19041, 19044, 19045] {
             assert_eq!(
-                automatic_backend(Monitor(1), Some((10, build))),
+                automatic_backend(Monitor(1), Some((10, build)), None),
                 DesktopDuplication
             );
-            assert_eq!(automatic_backend(Window(1), Some((10, build))), Wgc);
+            assert_eq!(
+                automatic_backend(Monitor(1), Some((10, build)), Some(false)),
+                DesktopDuplication
+            );
+            assert_eq!(
+                automatic_backend(Monitor(1), Some((10, build)), Some(true)),
+                Wgc
+            );
+            assert_eq!(automatic_backend(Window(1), Some((10, build)), None), Wgc);
         }
         for version in [
             None,
@@ -303,8 +320,9 @@ mod tests {
             Some((10, 26100)),
             Some((11, 30000)),
         ] {
-            assert_eq!(automatic_backend(Monitor(1), version), Wgc);
-            assert_eq!(automatic_backend(Window(1), version), Wgc);
+            assert_eq!(automatic_backend(Monitor(1), version, None), Wgc);
+            assert_eq!(automatic_backend(Monitor(1), version, Some(true)), Wgc);
+            assert_eq!(automatic_backend(Window(1), version, None), Wgc);
         }
     }
     #[test]

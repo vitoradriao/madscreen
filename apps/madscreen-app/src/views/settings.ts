@@ -2,7 +2,7 @@ import { icon } from "@shared/icons";
 import { errorText, getSettings } from "../api";
 import { banner, el, segmented, svg, type View } from "../dom";
 import { currentTheme, setTheme, type Theme } from "@shared/theme";
-import { avatar } from "@shared/ui";
+import { avatar, createRecoveryNotice } from "@shared/ui";
 import { client } from "../session";
 import { createSfuAdminPanel } from "@shared/sfu-admin";
 import { invoke } from "@tauri-apps/api/core";
@@ -77,9 +77,49 @@ export function createSettingsView(onLogout: () => Promise<void>, updates: Updat
     });
     account.replaceChildren(
       ...(user ? [el("div", { class: "identity" }, avatar(user, true), el("div", { class: "who" }, el("b", { textContent: user.displayName }), el("span", { textContent: `@${user.username}` })))] : []),
+      recovery,
       el("div", { class: "row mt" }, out),
     );
   }
+
+  // Chave de recuperação: só para contas criadas com nome de usuário (Discord/Google não usam).
+  const recovery = el("div", { class: "stack tight recovery-settings", hidden: true });
+  function renderRecovery(): void {
+    const generate = el("button", { class: "btn", type: "button" }, svg(icon("key", "sm")), "Gerar nova chave");
+    generate.addEventListener("click", () => {
+      const confirm = el("button", { class: "btn primary", type: "button", textContent: "Gerar nova chave" });
+      const cancel = el("button", { class: "btn", type: "button", textContent: "Cancelar" });
+      cancel.addEventListener("click", () => { renderRecovery(); generate.focus(); });
+      confirm.addEventListener("click", async () => {
+        confirm.disabled = true; cancel.disabled = true;
+        try {
+          const { recoveryKey } = await client.rotateRecoveryKey();
+          if (disposed) return;
+          recovery.replaceChildren(createRecoveryNotice(recoveryKey, () => { renderRecovery(); }, { title: "Sua nova chave de recuperação", doneLabel: "Concluir" }));
+        } catch (error) {
+          if (disposed) return;
+          confirm.disabled = false; cancel.disabled = false;
+          accountAlerts.replaceChildren(banner("error", `Não foi possível gerar a chave: ${errorText(error)}`));
+        }
+      });
+      recovery.replaceChildren(
+        el("h4", {}, "Gerar nova chave?"),
+        el("p", { class: "small muted", textContent: "A chave atual deixa de funcionar na hora. Guarde a nova antes de sair da conta." }),
+        el("div", { class: "row" }, cancel, confirm),
+      );
+      cancel.focus();
+    });
+    recovery.replaceChildren(
+      el("h4", {}, "Chave de recuperação"),
+      el("p", { class: "small muted", textContent: "É com ela que você entra de novo com o seu nome de usuário. Perdeu ou acha que alguém viu? Gere outra." }),
+      el("div", { class: "row" }, generate),
+    );
+  }
+  client.hasRecoveryKey().then(has => {
+    if (disposed || !has) return;
+    renderRecovery();
+    recovery.hidden = false;
+  }).catch(() => { /* Sem a informação, a opção fica escondida. */ });
 
   const updateStatus = el("div", { class: "alerts" });
   const install = el("button", { class: "btn primary", type: "button", textContent: "Instalar e reiniciar", hidden: true });
@@ -99,7 +139,7 @@ export function createSettingsView(onLogout: () => Promise<void>, updates: Updat
         case "current": return banner("ok", "Você já está na versão mais recente.");
         case "available": return banner("info", `Versão ${status.version} disponível. A instalação encerra a transmissão e reinicia o aplicativo.`);
         case "downloading": return banner("info", status.percent === null
-          ? `Baixando a versão ${status.version}: ${status.megabytes.toFixed(1)} MB`
+          ? `Baixando a versão ${status.version}: ${status.megabytes.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} MB`
           : `Baixando a versão ${status.version}: ${status.percent}%`);
         case "installing": return banner("info", "Instalando. O aplicativo será reiniciado…");
         case "error": return banner("error", status.stage === "check"
@@ -138,21 +178,41 @@ export function createSettingsView(onLogout: () => Promise<void>, updates: Updat
   sections.append(sfuAdmin.root);
   const navigation = el("nav", { class: "settings-nav snav", ariaLabel: "Seções da conta" });
   const entries = new Map<Element, HTMLButtonElement>();
+  const panels = new Map<Element, HTMLElement>();
+  let activeSection: Element | null = null;
+  const activate = (section: Element, focus = false): void => {
+    activeSection = section;
+    for (const [item, panel] of panels) panel.hidden = item !== section;
+    for (const [item, button] of entries) button.setAttribute("aria-current", String(item === section));
+    if (focus) {
+      root.scrollIntoView({ block: "start", behavior: "instant" });
+      const heading = section.querySelector<HTMLElement>("h3, h2");
+      if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
+    }
+  };
   for (const section of Array.from(sections.children)) {
     const title = section.querySelector("h3, h2")?.textContent;
     if (!title) continue;
     const pick = el("button", { class: "btn ghost", type: "button", textContent: title, hidden: (section as HTMLElement).hidden });
-    pick.addEventListener("click", () => {
-      section.scrollIntoView({ block: "start", behavior: "instant" });
-      for (const button of entries.values()) button.setAttribute("aria-current", String(button === pick));
-      const heading = section.querySelector<HTMLElement>("h3, h2");
-      if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
-    });
+    const panel = el("section", { class: "settings-panel", hidden: true, ariaLabel: title });
+    section.replaceWith(panel);
+    panel.append(section);
+    panels.set(section, panel);
+    pick.addEventListener("click", () => activate(section, true));
     entries.set(section, pick);
     navigation.append(pick);
   }
-  entries.values().next().value?.setAttribute("aria-current", "true");
-  const adminVisibility = new MutationObserver(() => { const pick = entries.get(sfuAdmin.root); if (pick) pick.hidden = sfuAdmin.root.hidden; });
+  const firstSection = entries.keys().next().value;
+  if (firstSection) activate(firstSection);
+  const adminVisibility = new MutationObserver(() => {
+    const pick = entries.get(sfuAdmin.root);
+    if (pick) pick.hidden = sfuAdmin.root.hidden;
+    if (sfuAdmin.root.hidden && activeSection === sfuAdmin.root && firstSection) {
+      // Sem autorização, a seção some: o foco não pode ficar perdido no corpo da página.
+      const focusLost = !document.activeElement || document.activeElement === document.body || sfuAdmin.root.contains(document.activeElement);
+      activate(firstSection, focusLost);
+    }
+  });
   adminVisibility.observe(sfuAdmin.root, { attributes: true, attributeFilter: ["hidden"] });
   for (const input of [joinSound, softwareDecode]) { input.classList.add("settings-switch"); input.setAttribute("role", "switch"); }
   root.classList.add("settings-view");

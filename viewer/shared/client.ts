@@ -209,7 +209,7 @@ export class MadClient {
       await wait(1500, signal);
     }
     signal.throwIfAborted();
-    throw new ApiFailure(0, "login_expirou", "O login pelo navegador não foi concluído.");
+    throw new ApiFailure(0, "login_expirou", "O acesso pelo navegador não foi concluído. Tente de novo.");
   }
 
   async logout(): Promise<void> {
@@ -224,6 +224,12 @@ export class MadClient {
     if (result.token && result.exp && this.session === session && session) this.setSession({ token: result.token, exp: result.exp, user: result.user });
     return result.user;
   }
+  /** `null` quando o servidor ainda não informa o tipo de acesso da conta. */
+  async hasRecoveryKey(): Promise<boolean | null> {
+    const result = await this.request<{ account?: { recoveryKey?: boolean } }>("GET", "/api/me");
+    return typeof result.account?.recoveryKey === "boolean" ? result.account.recoveryKey : null;
+  }
+  rotateRecoveryKey = () => this.request<{ recoveryKey: string }>("POST", "/api/me/recovery-key", {});
   friends = () => this.request<Snapshot>("GET", "/api/friends");
   requestFriend = (username: string) => this.request<Snapshot>("POST", "/api/friends/request", { username });
   acceptFriend = (id: string) => this.request<Snapshot>("POST", "/api/friends/accept", { id });

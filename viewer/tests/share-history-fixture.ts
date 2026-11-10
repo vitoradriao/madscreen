@@ -50,7 +50,7 @@ export async function checkShareHistory(check:(ok:unknown,label:string)=>void,fl
     const prior=windows;windows=[{...windows[0],instance_id:"c".repeat(64)}];
     button("Compartilhar").click();await flush();
     check(starts.length===0&&view.root.textContent?.includes("fechada ou substituída"),"Janela reciclada entre seleção e início é recusada sem fallback para monitor");
-    windows=prior;button("Compartilhar").click();await flush();
+    windows=prior;button("Tentar novamente").click();await flush();
     check(starts.length===1&&starts[0].source.kind==="verified_window"&&starts[0].source.instance_id===instanceId
       &&starts[0].height===720&&starts[0].fps===30&&starts[0].audio.follow_window&&starts[0].selectionId===1,"Início confirmado envia identidade esperada, ticket, qualidade salva e som da janela");
     liveState={phase:"live",session_id:1,quality_height:720,source_instance_id:instanceId,source:"Fonte privada do laboratório",encoder:"fixture",width:1280,height:720,
@@ -58,6 +58,7 @@ export async function checkShareHistory(check:(ok:unknown,label:string)=>void,fl
       publishing:false,publishing_connected:null,audio_active:1,message:null,message_is_error:false,diagnostic:null};view.update(liveState);
     const stored=localStorage.getItem(key)!;
     check(!stored.includes("Fonte privada")&&!stored.includes("456")&&!stored.includes(instanceId)&&stored.includes(appId),"Histórico gravado após início confirmado exclui título, alvo efêmero e identidade da instância");
+    view.root.querySelector<HTMLDetailsElement>('.share-quality')!.open=true;
     [...view.root.querySelectorAll<HTMLButtonElement>('[aria-label="Taxa de quadros"] button')].find(b=>b.textContent==="60 FPS")!.click();await flush();
     button("Aplicar qualidade").click();await flush();
     check(JSON.parse(localStorage.getItem(key)!).apps[0].fps===60,"Qualidade aplicada durante live só atualiza perfil após confirmação do supervisor da mesma fonte");
@@ -151,7 +152,7 @@ export async function checkShareHistory(check:(ok:unknown,label:string)=>void,fl
     check(starts.length===4&&view.root.textContent?.includes("Permissão de janela indisponível"),"Permissão perdida após seleção falha sem captura ou fallback");
     listDenied=false;
     let release!:()=>void;listGate=new Promise<void>(resolve=>{release=resolve;});
-    button("Compartilhar").click();await flush();view.updateDirectory({servers:[]} as any);release();await flush();listGate=null;
+    button("Tentar novamente").click();await flush();view.updateDirectory({servers:[]} as any);release();await flush();listGate=null;
     check(starts.length===4,"Canal removido durante revalidação impede publicação tardia");
     view.updateDirectory(directory);
     listGate=new Promise<void>(resolve=>{release=resolve;});button("Compartilhar").click();await flush();

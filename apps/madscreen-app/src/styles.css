@@ -1,6 +1,20 @@
 /* Layout do app. Cores, tipografia e componentes base vêm de viewer/shared/tokens.css. */
-html, body, #app { height: 100%; }
-body { overflow: hidden; }
+html, body { height: 100%; }
+body { overflow: hidden; display: flex; flex-direction: column; }
+#app { flex: 1; min-height: 0; }
+
+/* ---- barra de título própria (janela sem moldura nativa) ---- */
+#titlebar { display: none; }
+:root[data-titlebar="custom"] #titlebar { display: flex; align-items: stretch; flex: none; height: 32px; background: var(--bg); color: var(--text-2); user-select: none; -webkit-user-select: none; }
+.titlebar-brand { display: flex; align-items: center; gap: var(--sp-2); padding-left: var(--sp-3); font-size: var(--fs-xs); font-weight: var(--fw-medium); letter-spacing: .02em; }
+.titlebar-logo { width: 18px; height: 10px; color: var(--text); }
+.titlebar-drag { flex: 1; }
+.titlebar-controls { display: flex; }
+.titlebar-btn { all: unset; box-sizing: border-box; display: grid; place-items: center; width: 46px; height: 100%; color: var(--text-2); cursor: default; transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease); }
+.titlebar-btn svg { width: 10px; height: 10px; pointer-events: none; }
+.titlebar-btn:hover { background: var(--surface-3); color: var(--text); }
+.titlebar-btn.close:hover { background: #e81123; color: #fff; }
+.titlebar-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 
 /* ---- estrutura ---- */
 .shell { display: grid; grid-template-columns: 76px minmax(0, 1fr); height: 100%; }
@@ -150,3 +164,49 @@ body { overflow: hidden; }
 .update-bar > span { display: block; height: 100%; background: var(--accent); transition: width var(--t-fast) linear; }
 /* O player compacto fica no mesmo canto: sobe o aviso quando ele está aberto. */
 .watch-compact:not([hidden]) ~ .update-notice { bottom: calc(var(--sp-5) + 260px); }
+
+/* A configuração conduz a tarefa; o vídeo só ocupa espaço com a prévia aberta. */
+.share-view { width: 100%; max-width: 1000px; margin-inline: auto; }
+.share-view .share-layout { display: flex; flex-direction: column; gap: var(--sp-5); }
+.share-view .share-side.steps { width: 100%; max-width: none; padding: 0; background: transparent; border: 0; border-radius: 0; }
+.share-view .share-side .share-step { grid-template-columns: 28px minmax(0, 1fr); padding: var(--sp-5) 0; gap: var(--sp-4); }
+.share-view .share-side .share-step:first-child { padding-top: 0; }
+.share-view .share-step .body { min-width: 0; display: grid; gap: var(--sp-2); }
+.share-view .share-step h2 { font-size: var(--fs-lg); }
+.share-view .share-step.locked { opacity: 1; }
+.share-view .share-step .input { max-width: 440px; }
+.share-source-row { display: flex; align-items: center; gap: var(--sp-5); min-width: 0; }
+.share-source-row > .grow { min-width: 0; }
+.share-source-row > .btn { flex: none; }
+.share-view .share-quality > summary { display: list-item; width: fit-content; min-height: var(--control-h-sm); color: var(--text); font-size: var(--fs-md); }
+.share-view .share-quality > .mt { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: var(--sp-4) var(--sp-6); margin-top: var(--sp-2); }
+.share-view .share-quality > .mt > p { grid-column: 1 / -1; max-width: 70ch; }
+.share-view .share-side .res-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--sp-2); }
+.share-view .res-option { min-height: 64px; padding: var(--sp-3); gap: var(--sp-1); }
+.share-view .res-dimensions { font-size: var(--fs-xs); }
+.share-view .share-side .share-actions { position: static; display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-3); padding: var(--sp-4) 0 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; }
+.share-view .share-actions > p { flex: 1; min-width: 180px; }
+.share-view .share-actions > .alerts { flex-basis: 100%; }
+.share-view .share-actions > .alerts:empty { display: none; }
+.share-view .share-apply .btn { width: auto; }
+.share-view .share-main { width: 100%; gap: var(--sp-3); }
+.share-view .share-main .share-diagnostics { padding: var(--sp-3) var(--sp-4); background: transparent; }
+.share-preview-note { max-width: 70ch; }
+.share-support { display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--sp-3); }
+.share-support > .share-diagnostics { flex: 1; min-width: 240px; }
+@media (max-height: 620px) {
+  .share-view { gap: var(--sp-4); }
+  .share-view .view-head { padding-block: 0; }
+  .share-view .share-side .share-step { padding-block: var(--sp-4); }
+}
+@media (max-width: 1100px) {
+  .share-view .share-quality > .mt { grid-template-columns: minmax(0, 1fr); }
+  .share-view .share-side .res-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 680px) {
+  .share-source-row { align-items: flex-start; flex-direction: column; gap: var(--sp-3); }
+  .share-view .share-side .share-step { padding-block: var(--sp-4); gap: var(--sp-3); }
+  .share-view .share-side .res-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .share-view .view-head > .grow { min-width: 0; }
+  .share-view .share-actions > p { min-width: 0; flex-basis: 100%; }
+}

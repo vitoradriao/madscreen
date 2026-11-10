@@ -73,7 +73,7 @@ O app verifica se há versão nova ao abrir e depois a cada hora. Quando há, mo
 
 - **Minha transmissão** em três passos numerados (Canal, Fonte e som, Qualidade e FPS); o passo concluído ganha o número em `accent`. Compartilhar só habilita com fonte escolhida. "Nunca o microfone" fica dito no passo de fonte.
 - **Seletor de fonte**: diálogo de 900px com Segmented Aplicativos / Telas, Atualizar, o app em foco como sugestão, grade de miniaturas e a seção Som (som do aplicativo; ou PC todo e aplicativos específicos, com TOCANDO). Rodapé com Usar o seletor do Windows e Continuar.
-- **Diálogos**: título (pergunta, nas destrutivas), um campo ou a consequência, Cancelar e a ação com o mesmo verbo do título. Entrar por convite mostra o servidor de destino antes de entrar.
+- **Diálogos**: título (pergunta, nas destrutivas), um campo ou a consequência, Cancelar e a ação com o mesmo verbo do título. Entrar com convite mostra o servidor de destino antes de entrar, na entrada, no menu + e no vazio sem servidor. Campos de nome têm rótulo visível.
 - **Menus**: nome do servidor no cabeçalho, engrenagem nas abas, ⋯ no membro. Só o dono renomeia e apaga o servidor e muda papéis; dono e admin gerenciam canais. Esconda o que a pessoa não pode fazer.
 
 ## Conta e serviço
@@ -95,9 +95,11 @@ O app verifica se há versão nova ao abrir e depois a cada hora. Quando há, mo
 ## Entrada
 
 - Tela de entrada: `display` e `lead` à esquerda, um cartão de acesso de 400–420px à direita, uma ação principal por vez.
-- **Entrar sem Discord**: Segmented "Tenho um convite / Já tenho conta". Com convite: o servidor de destino aparece quando o convite é conferido, depois o nome de usuário (até 20 caracteres) e Criar conta. Com conta: nome de usuário, chave de recuperação (campo oculto, em mono) e Entrar. Continuar com Discord desce para botão contornado depois de um "ou".
-- **Chave de recuperação**: mostrada uma única vez, numa caixa tracejada em mono que seleciona inteira, com Copiar chave e Guardei, continuar.
-- **Convite antes de entrar**: o servidor de destino à esquerda e as formas de entrar à direita; o convite fica guardado durante o login.
+- **Primeira tela**: o título diz o trabalho ("Compartilhe a tela e o som do jogo com seus amigos"), sem prometer desempenho. O campo "Convite de um amigo (opcional)" vem antes do Discord e mostra o destino enquanto a pessoa cola ou digita. Abaixo de Continuar com Discord, uma linha explica que o Discord só identifica a pessoa. Com convite conferido, o título vira "<quem convidou> convidou você para <servidor>".
+- **Entrar sem Discord**: avisa que a conta sem Discord precisa do convite de um amigo. Segmented "Criar conta com convite / Entrar com chave". Criar conta: convite (obrigatório, exceto para a primeira conta), nome de usuário com a regra visível antes do envio e Criar conta. Entrar com chave: nome de usuário, chave (campo oculto, em mono), o que fazer se perdeu a chave e Entrar. Continuar com Discord desce para botão contornado depois de um "ou". A ordem do DOM acompanha a ordem visual.
+- **Chave de recuperação**: mostrada uma única vez, numa caixa tracejada em mono que seleciona inteira. O foco vai para o título, o texto diz a consequência de perder a chave, e Continuar só habilita depois de marcar "Guardei a chave em um lugar seguro". Em Conta, quem entra com chave pode gerar uma nova (a antiga deixa de valer).
+- **Convite antes de entrar**: "<quem convidou> convidou você para <servidor>", com o destino, e as formas de entrar: baixar o app, abrir no app ou assistir pelo navegador. O convite fica guardado durante o login.
+- **Primeiro uso**: servidor só com você mostra "Chame seus amigos para cá" com Convidar amigos como ação principal, Compartilhar tela e Trocar o nome. Sem servidor, o vazio oferece o campo de convite com prévia e Criar um servidor. O diálogo de convite não fecha sozinho e diz validade e limite de usos.
 
 ## Iconografia
 

@@ -72,17 +72,25 @@ pub fn list(exclude_pid: Option<u32>, monitors_only: bool) -> Result<SourceList>
         })
         .collect();
     // A consulta de capacidades é opcional: nenhuma falha deve impedir a listagem.
-    let encoder = (|| -> Result<_> {
+    let (gpu_vendor_id, probe) = (|| -> Result<_> {
         let _runtime = platform::Runtime::new()?;
         let gpu = GpuDevice::new(None)?;
-        Ok(crate::limits::h264_limits(&nvenc::probe(&gpu)?))
+        let vendor = platform::device_adapter(&gpu.device)
+            .ok()
+            .map(|adapter| adapter.vendor_id);
+        Ok((vendor, nvenc::probe(&gpu).ok()))
     })()
-    .ok()
-    .flatten()
-    .or(Some(madscreen_ipc::EncoderLimits::default()));
+    .unwrap_or((None, None));
+    let nvenc_available = Some(probe.is_some());
+    let encoder = probe
+        .as_ref()
+        .and_then(crate::limits::h264_limits)
+        .or(Some(madscreen_ipc::EncoderLimits::default()));
     Ok(SourceList {
         windows,
         monitors,
         encoder,
+        nvenc_available,
+        gpu_vendor_id,
     })
 }

@@ -35,6 +35,11 @@ e `queue_wait_max_ms` reutilizam QPCs existentes. Submissão de conversão é te
 CPU/driver, não execução GPU; espera de fila é do fim da submissão ao início do
 encode. Campo ausente/timing inválido permanece null. Nenhuma query/sincronização
 GPU adicional foi incluída para esses campos.
+Campos opcionais do caminho do encoder: `encoder`, `output_width`/`output_height`,
+`fps_target`, `vbv_frames`, `process_cpu_percent` (CPU do engine no intervalo, em % da
+máquina inteira), `readback_map_max_ms`/`readback_copy_max_ms`/`codec_send_max_ms`
+(máximos do readback FFmpeg; null no NVENC) e os acumulados `static_refine_frames`
+(repetições do último quadro com a tela parada) e `idle_keyframes`. Engine anterior: null.
 Estatística WGC é ausente em fonte sintética. `sampleGapMs` e `statsCollectionMs`
 identificam lacunas/custo de getStats no viewer. rVFC observa entrega ao compositor.
 

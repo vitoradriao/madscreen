@@ -1,1 +1,14 @@
-`madscreen-glyph-light.svg` (traço `#fafafa`, para o Grafite) e `madscreen-glyph-dark.svg` (traço `#0d0d0d`, para o Papel): o glifo `logo` do código, um monitor com play. `m-mark-capture.png` e `madscreen-lockup-capture.png` são recortes 1x das capturas do redesign (marca "m." e assinatura "m. madscreen", brancas sobre `#141414`/`#111111`). São só referência até existir um vetor; na interface, componha a marca em texto Inter.
+# Marca madscreen
+
+| Formato | Para fundo escuro | Para fundo claro |
+| --- | --- | --- |
+| Símbolo “m.” | [Claro](madscreen-mark-light.svg) | [Escuro](madscreen-mark-dark.svg) |
+| Assinatura “m. madscreen” | [Clara](madscreen-lockup-light.svg) | [Escura](madscreen-lockup-dark.svg) |
+
+Os SVGs têm fundo transparente e contornos de Inter convertidos em curvas.
+Use o símbolo em espaços compactos e a assinatura quando o nome precisar
+aparecer. Ao redimensionar, preserve a proporção do arquivo.
+
+Os PNGs [do símbolo](m-mark-capture.png) e [da assinatura](madscreen-lockup-capture.png)
+são os recortes de referência do redesign. Os arquivos `madscreen-glyph-*.svg`
+contêm o pictograma de monitor com play.

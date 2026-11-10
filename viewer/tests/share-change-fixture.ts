@@ -31,7 +31,9 @@ export async function checkShareChanges(check: (condition: unknown, name: string
     await flush(); view.update(state()); await flush();
     view.root.querySelector<HTMLDetailsElement>(".share-quality")!.open = true;
     check(!radio("720p").disabled && !button("Trocar janela ou tela").disabled, "Qualidade e troca de fonte ficam disponíveis durante a live");
+    check(view.root.querySelector<HTMLElement>('.share-apply')!.hidden, "Live sem edição não oferece Aplicar qualidade desnecessariamente");
     radio("720p").click(); button("30 FPS").click(); await flush();
+    check(!view.root.querySelector<HTMLElement>('.share-apply')!.hidden, "Alteração de qualidade revela a confirmação junto de Parar");
     check(view.root.querySelector('.share-source')?.textContent?.includes("Janela original · 1920×1080") && view.root.textContent?.includes("Em transmissão: 1920×1080 · 60 FPS · Escolha pendente: 720p · 30 FPS"), "Resumo distingue qualidade em transmissão da escolha ainda não aplicada");
     (window as any).shareUiHtml = view.root.outerHTML;
     button("Aplicar qualidade").click(); button("Aplicar qualidade").click(); await flush();
@@ -42,6 +44,7 @@ export async function checkShareChanges(check: (condition: unknown, name: string
     view.update(state({ session_id: 2, quality_height: 720, width: 1280, height: 720, fps_target: 30, fps: 30 })); finish?.(); await flush();
     check(radio("720p").getAttribute("aria-checked") === "true" && button("Aplicar qualidade").disabled, "Pipeline confirmado restaura controles com a qualidade aplicada");
     button("Trocar janela ou tela").click(); await flush();
+    check(document.querySelector('.pk-foot')?.textContent?.includes("trocados na live"), "Troca durante a live explica que escolher a fonte aplica imagem e som imediatamente");
     document.querySelector<HTMLButtonElement>('.pk-close')!.click(); await flush();
     check(changes.length === 1 && stops === 0 && view.root.textContent?.includes("Janela original"), "Cancelar o seletor mantém a transmissão e a fonte anteriores");
     button("Trocar janela ou tela").click(); await flush();

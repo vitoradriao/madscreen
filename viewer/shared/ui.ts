@@ -44,7 +44,12 @@ export interface LoginOptions {
   onLoggedIn(recoveryKey?: string): void;
   invite?: string | undefined;
   signal?: AbortSignal;
-  onInviteDestination?(server: string | null, channel: string | null): void;
+  onInviteDestination?(server: string | null, channel: string | null, inviter?: string | null): void;
+}
+
+function describe(input: HTMLElement, hint: HTMLElement): void {
+  if (!hint.id) hint.id = nextFieldId();
+  input.setAttribute("aria-describedby", hint.id);
 }
 
 export function createLogin(client: MadClient, options: LoginOptions): HTMLElement {
@@ -53,8 +58,9 @@ export function createLogin(client: MadClient, options: LoginOptions): HTMLEleme
   let abort: AbortController | null = null;
   options.signal?.addEventListener("abort", () => abort?.abort(), { once: true });
 
-  const discord = el("button", { class: "btn primary big block", type: "button" }, svg(icon("radio")), "Continuar com Discord");
-  const google = el("button", { class: "btn big block", type: "button", hidden: true }, svg(icon("users")), "Continuar com Google");
+  const discord = el("button", { class: "btn primary big block", type: "button", textContent: "Continuar com Discord" });
+  const google = el("button", { class: "btn big block", type: "button", hidden: true, textContent: "Continuar com Google" });
+  const why = el("p", { class: "small muted auth-why", textContent: "O Discord só confirma quem você é. A transmissão é do madscreen, sem usar o compartilhamento de tela do Discord." });
   const hint = el("p", { class: "small faint", hidden: true });
 
   async function oauth(provider: "discord" | "google"): Promise<void> {
@@ -80,7 +86,7 @@ export function createLogin(client: MadClient, options: LoginOptions): HTMLEleme
       clearPkce();
       alerts.replaceChildren();
     });
-    alerts.replaceChildren(el("div", { class: "banner info row between" }, "Conclua o login na janela do navegador…", cancel));
+    alerts.replaceChildren(el("div", { class: "banner info row between", role: "status" }, "Autorize o acesso na janela do navegador que abriu…", cancel));
     try {
       await client.awaitOAuth(verifier, controller.signal);
       if (controller.signal.aborted || options.signal?.aborted || abort !== controller) return;
@@ -96,40 +102,55 @@ export function createLogin(client: MadClient, options: LoginOptions): HTMLEleme
   }
 
   const username = el("input", { class: "input", placeholder: "seunome", autocomplete: "username", maxLength: 20, spellcheck: false });
+  const usernameRule = el("p", { class: "small muted", textContent: "De 3 a 20 letras minúsculas, números, ponto ou sublinhado. É o nome que seus amigos vão ver." });
+  describe(username, usernameRule);
   const code = el("input", { class: "input", placeholder: "XXXX-XXXX ou link do convite", autocomplete: "off", maxLength: 512, spellcheck: false, value: options.invite ?? pendingInvite() ?? "" });
   const create = el("button", { class: "btn primary block", type: "submit", textContent: "Criar conta" });
-  const codeField = field("Tenho um convite (código ou link)", code);
+  const codeField = field("Convite de um amigo (opcional)", code);
+  const idleDestination = "Cole o código ou o link para entrar direto no servidor de quem convidou.";
   const destination = el("p", { class: "small muted", role: "status" });
+  describe(code, destination);
+  const inviteBlock = el("div", { class: "auth-invite stack tight" }, codeField, destination);
   let previewVersion = 0;
-  async function previewDestination(): Promise<void> {
-    const version = ++previewVersion;
+  let previewTimer = 0;
+  async function previewDestination(version = ++previewVersion): Promise<void> {
     const value = code.value.trim();
-    options.onInviteDestination?.(null, null);
-    destination.textContent = value ? "Consultando destino do convite…" : "Cole o convite para conferir em qual servidor você vai entrar.";
+    options.onInviteDestination?.(null, null, null);
+    destination.textContent = value ? "Conferindo o convite…" : idleDestination;
     if (!value) return;
     try {
       const preview = await client.previewInvite(value);
       if (version !== previewVersion || options.signal?.aborted) return;
-      options.onInviteDestination?.(preview.server?.name ?? null, preview.channel?.name ?? null);
+      options.onInviteDestination?.(preview.server?.name ?? null, preview.channel?.name ?? null, preview.inviter.displayName);
       destination.textContent = preview.server
-        ? `Convite de ${preview.inviter.displayName} para ${preview.server.name}${preview.channel ? ` · ${preview.channel.name}` : ""}. Você entrará após o login.`
-        : `Convite de ${preview.inviter.displayName}. Você se conectará a essa pessoa após o login.`;
+        ? `Convite de ${preview.inviter.displayName} para ${preview.server.name}${preview.channel ? ` · # ${preview.channel.name}` : ""}. Você entra no servidor logo depois de acessar.`
+        : `Convite de ${preview.inviter.displayName}. Vocês ficam conectados logo depois de você acessar.`;
     } catch (error) {
       if (version === previewVersion && !options.signal?.aborted) destination.textContent = `${errorText(error)} Confira o convite ou peça um novo link a quem convidou.`;
     }
   }
-  code.addEventListener("input", () => { previewVersion++; options.onInviteDestination?.(null, null); destination.textContent = "Confirme o destino ao sair deste campo."; });
-  code.addEventListener("change", () => { void previewDestination(); });
+  // A prévia sai enquanto a pessoa cola ou digita, sem esperar o campo perder o foco.
+  code.addEventListener("input", () => {
+    const version = ++previewVersion;
+    clearTimeout(previewTimer);
+    options.onInviteDestination?.(null, null, null);
+    destination.textContent = code.value.trim() ? "Conferindo o convite…" : idleDestination;
+    previewTimer = window.setTimeout(() => { void previewDestination(version); }, 400);
+  });
+  options.signal?.addEventListener("abort", () => clearTimeout(previewTimer), { once: true });
   void previewDestination();
-  const registerForm = el("form", { class: "stack", noValidate: true }, field("Nome de usuário", username), create);
+  const registerNote = el("p", { class: "small muted", textContent: "Sem Discord, a conta é criada com o convite de um amigo. Você recebe uma chave para entrar de novo depois." });
+  const registerForm = el("form", { class: "stack", noValidate: true }, registerNote, field("Nome de usuário", username), usernameRule, create);
 
   const loginUser = el("input", { class: "input", placeholder: "seunome", autocomplete: "username", spellcheck: false });
   const recovery = el("input", { class: "input mono", placeholder: "XXXXX-XXXXX-XXXXX-XXXXX", autocomplete: "current-password", spellcheck: false, type: "password" });
+  const lostKey = el("p", { class: "small muted", textContent: "Perdeu a chave? Ela não pode ser recuperada. Se você ainda está conectado em outro computador, gere uma nova em Conta. Se não, peça um convite novo a um amigo e crie outra conta." });
+  describe(recovery, lostKey);
   const enter = el("button", { class: "btn primary block", type: "submit", textContent: "Entrar" });
-  const loginForm = el("form", { class: "stack", noValidate: true, hidden: true }, field("Nome de usuário", loginUser), field("Chave de recuperação", recovery), enter);
+  const loginForm = el("form", { class: "stack", noValidate: true, hidden: true }, field("Nome de usuário", loginUser), field("Chave de recuperação", recovery), lostKey, enter);
 
   const mode = segmented<"invite" | "account">(
-    [{ value: "invite", label: "Tenho um convite" }, { value: "account", label: "Já tenho conta" }],
+    [{ value: "invite", label: "Criar conta com convite" }, { value: "account", label: "Entrar com chave" }],
     "invite",
     (value) => {
       registerForm.hidden = value !== "invite";
@@ -137,16 +158,26 @@ export function createLogin(client: MadClient, options: LoginOptions): HTMLEleme
       alerts.replaceChildren();
     },
   );
-  mode.root.setAttribute("aria-label", "Entrar sem Discord");
+  mode.root.setAttribute("aria-label", "Como entrar sem Discord");
   const fallback = el("details", { class: "auth-fallback" }, el("summary", { textContent: "Entrar sem Discord" }), el("div", { class: "stack mt" }, mode.root, registerForm, loginForm));
-  const oauthGroup = el("div", { class: "stack tight auth-oauth" }, discord, google, hint);
-  fallback.addEventListener("toggle", () => {
+  const oauthGroup = el("div", { class: "stack tight auth-oauth" }, discord, google, why, hint);
+  // A ordem do DOM acompanha a ordem visual: o Tab percorre a tela de cima para baixo.
+  let firstUser = false;
+  const arrange = (): void => {
+    // Sem Discord o convite é obrigatório (exceto para a primeira conta); com Discord ele é opcional.
+    codeField.querySelector("label")!.textContent = firstUser ? "Código de convite (opcional: você é o primeiro)"
+      : fallback.open ? "Convite de um amigo" : "Convite de um amigo (opcional)";
     root.classList.toggle("alternative", fallback.open);
     discord.classList.toggle("primary", !fallback.open);
-    if (fallback.open) registerForm.prepend(codeField, destination);
-    else root.insertBefore(el("div", { class: "auth-invite stack tight" }, codeField, destination), oauthGroup);
-    for (const empty of root.querySelectorAll(".auth-invite:empty")) empty.remove();
-  });
+    why.hidden = fallback.open;
+    if (fallback.open) {
+      registerForm.insertBefore(inviteBlock, registerNote.nextSibling);
+      root.replaceChildren(heading, fallback, oauthGroup, alerts);
+    } else {
+      root.replaceChildren(heading, inviteBlock, oauthGroup, fallback, alerts);
+    }
+  };
+  fallback.addEventListener("toggle", arrange);
 
   registerForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -186,39 +217,45 @@ export function createLogin(client: MadClient, options: LoginOptions): HTMLEleme
         : `O login com ${providers.discord ? "Google" : "Discord"} ainda não foi configurado.`;
     }
     if (providers.firstUser) {
+      firstUser = true;
       codeField.querySelector("label")!.textContent = "Código de convite (opcional: você é o primeiro)";
+      registerNote.textContent = "Você é a primeira pessoa deste servidor do madscreen, então o convite não é necessário. Você recebe uma chave para entrar de novo depois.";
     }
   }).catch(() => { fallback.open = true; say("error", "Não foi possível consultar as opções de entrada. Confira sua conexão e tente entrar novamente."); });
 
   const pending = savedPkce();
   if (pending) queueMicrotask(() => void resume(pending));
 
-  const root = el(
-    "div",
-    { class: "stack loose fade-in auth-flow" },
-    el("div", { class: "stack tight" }, el("h2", {}, options.invite ? "Convite recebido" : "Acessar conta")),
-    el("div", { class: "auth-invite stack tight" }, codeField, destination),
-    oauthGroup,
-    fallback,
-    alerts,
-  );
+  const heading = el("div", { class: "stack tight" }, el("h2", {}, options.invite ? "Convite recebido" : "Entrar"));
+  const root = el("div", { class: "stack loose fade-in auth-flow" });
+  arrange();
   return root;
 }
 
-/** Mostra a chave de recuperação uma única vez, depois do cadastro por convite. */
-export function createRecoveryNotice(key: string, done: () => void): HTMLElement {
+/** Mostra a chave de recuperação uma única vez, depois do cadastro por convite ou da troca em Conta. */
+export function createRecoveryNotice(key: string, done: () => void, options: { title?: string; doneLabel?: string } = {}): HTMLElement {
   const copy = el("button", { class: "btn", type: "button" }, svg(icon("copy", "sm")), "Copiar chave");
-  copy.addEventListener("click", () => { void copyText(key).then((ok) => { copy.lastChild!.textContent = ok ? "Copiado" : "Selecione e copie"; }); });
-  const ok = el("button", { class: "btn primary", type: "button", textContent: "Guardei, continuar" });
+  copy.addEventListener("click", () => { void copyText(key).then((ok) => { copy.lastChild!.textContent = ok ? "Chave copiada" : "Selecione a chave e copie"; }); });
+  const ok = el("button", { class: "btn primary", type: "button", textContent: options.doneLabel ?? "Continuar", disabled: true });
   ok.addEventListener("click", done);
-  return el(
+  const saved = el("input", { type: "checkbox" });
+  saved.addEventListener("change", () => { ok.disabled = !saved.checked; });
+  const heading = el("h2", { tabIndex: -1, textContent: options.title ?? "Guarde sua chave de recuperação" });
+  const box = el("div", { class: "keybox mono recovery-key", textContent: key });
+  box.setAttribute("aria-label", `Chave de recuperação: ${key}`);
+  const root = el(
     "div",
-    { class: "stack loose fade-in" },
-    el("div", { class: "stack tight" }, el("span", { class: "eyebrow", textContent: "Conta criada" }), el("h2", {}, "Guarde sua chave de recuperação")),
-    el("p", { class: "muted", textContent: "É a única forma de entrar de novo em outro computador com nome de usuário. Ela não será mostrada outra vez." }),
-    el("div", { class: "keybox mono recovery-key", textContent: key }),
-    el("div", { class: "row" }, copy, ok),
+    { class: "stack loose fade-in recovery-notice" },
+    heading,
+    el("p", { class: "muted", textContent: "Ela funciona como a sua senha: sem ela, você não entra de novo se sair da conta ou trocar de computador. A chave não aparece outra vez, mas você pode gerar uma nova em Conta enquanto estiver conectado." }),
+    box,
+    el("div", { class: "row" }, copy),
+    el("label", { class: "row check" }, saved, "Guardei a chave em um lugar seguro"),
+    el("div", { class: "row" }, ok),
   );
+  // Quem usa leitor de tela precisa saber que a chave apareceu: o foco vai para o título.
+  setTimeout(() => { if (root.isConnected) heading.focus(); }, 0);
+  return root;
 }
 
 // ---- Amigos ------------------------------------------------------------------------------------
@@ -398,6 +435,10 @@ const STATE_TEXT: Record<WatchState, string> = {
 export interface WatchOptions {
   popout?(stage: HTMLElement, title: string): Promise<{ close(): void }>;
   keyboardActive?(): boolean;
+  /** Ajuda compartilhada pelo layout, sem redimensionar os vídeos. */
+  helpHost?: HTMLElement;
+  /** Avisa o layout que esta ajuda passou a ocupar o `helpHost`. */
+  onHelpShown?(): void;
   /** O app Tauri leva a janela inteira para tela cheia; no navegador usa a Fullscreen API. */
   toggleFullscreen?(stage: HTMLElement): Promise<void>;
   onLeave?(): void;
@@ -458,10 +499,10 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
   const playerStats = el("span", { class: "player-stats mono", hidden: true });
   const fullscreen = el("button", { class: "btn sm", type: "button", title: "Tela cheia" }, svg(icon("fullscreen", "sm")));
   const diagnostic = el("button", { class: "btn sm", type: "button", textContent: "Copiar diagnóstico", title: "Copie logo após uma travadinha para registrar os últimos segundos.", disabled: true });
-  const diagnosticHelp = el("p", { class: "small muted" }, "Travou ou apresentou ruído? Copie logo após o problema e peça o diagnóstico da transmissão ao amigo. Informe a versão dos dois apps e a fonte escolhida. Não foi possível determinar a causa apenas pelo estado da conexão.");
+  const diagnosticHelp = el("p", { class: "small muted" }, "Para pedir ajuda, informe a versão do seu app e peça também o diagnóstico de quem transmite. O relatório contém contadores e tempos, sem imagem ou som.");
   const stateDetail = el("p", { class: "small muted", hidden: true });
   const guidance = el("div", { class: "stack tight", hidden: true });
-  const explain = el("input", { type: "checkbox", checked: true });
+  const explain = el("input", { type: "checkbox" });
   const refreshGuidance = () => {
     guidance.hidden = !explain.checked;
     guidance.replaceChildren(...(explain.checked ? diagnosticGuidance(session?.getDiagnostics() ?? null, performance.now(), document.hidden).map(text => el("p", { class: "small muted" }, text)) : []));
@@ -469,28 +510,61 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
   explain.addEventListener("change", refreshGuidance);
   const refresh = el("button", { class: "btn sm", type: "button", textContent: "Atualizar observações" });
   refresh.addEventListener("click", refreshGuidance);
+  const closeHelp = el("button", { class: "btn sm", type: "button", textContent: "Fechar ajuda" });
+  const helpTitle = el("summary", { textContent: "Detalhes e ajuda" });
   const diagnostics = el("details", { class: "watch-diagnostics" },
-    el("summary", { textContent: "Detalhes e ajuda" }),
-    el("div", { class: "stack tight mt" }, hud, stateDetail, diagnosticHelp,
+    helpTitle,
+    el("div", { class: "watch-help-actions row" }, diagnostic, closeHelp),
+    el("div", { class: "stack tight mt" }, stateDetail,
+      el("p", { class: "small" }, "Use o volume para ajustar o som, M para silenciar e F para tela cheia. Se houver travadas ou ruído, copie o diagnóstico e envie a quem transmite."),
+      diagnosticHelp,
+      el("details", { class: "watch-technical" }, el("summary", {}, "Detalhes técnicos"), hud,
       el("label", { class: "row" }, explain, "Mostrar observações do último intervalo"),
-      el("p", { class: "small muted" }, "Retrato ao abrir a ajuda ou escolher Atualizar observações; não acompanha a transmissão continuamente."), guidance, refresh, diagnostic),
+      el("p", { class: "small muted" }, "Retrato ao abrir a ajuda ou escolher Atualizar observações; não acompanha a transmissão continuamente."), guidance, refresh)),
   );
   const info = el("button", { class: "btn sm", type: "button", textContent: "Ajuda" });
   info.setAttribute("aria-expanded", "false");
-  info.addEventListener("click", async () => {
-    if (document.fullscreenElement === stage) {
-      try { await document.exitFullscreen(); } catch { return; }
+  const syncHelp = (): void => {
+    info.setAttribute("aria-expanded", String(diagnostics.open));
+    if (diagnostics.open) {
+      const host = document.fullscreenElement === stage ? stage : options.helpHost;
+      if (host) {
+        const previous = diagnostics.parentElement;
+        for (const other of host.querySelectorAll<HTMLDetailsElement>(".watch-diagnostics[open]")) {
+          if (other !== diagnostics) other.open = false;
+        }
+        host.append(diagnostics);
+        if (previous === options.helpHost && previous !== host && !previous.querySelector(".watch-diagnostics[open]")) previous.hidden = true;
+        if (host === options.helpHost) { host.hidden = false; options.onHelpShown?.(); }
+      }
+      refreshGuidance();
+    } else {
+      const host = diagnostics.parentElement;
+      if (diagnostics.contains(document.activeElement)) info.focus();
+      if (host && host !== panel.root) panel.root.append(diagnostics);
+      if (host === options.helpHost && !host.querySelector(".watch-diagnostics[open]")) host.hidden = true;
     }
+  };
+  info.addEventListener("click", () => {
     diagnostics.open = !diagnostics.open;
-    if (diagnostics.open) diagnostics.querySelector("summary")?.focus();
+    syncHelp();
+    if (diagnostics.open) closeHelp.focus();
   });
-  diagnostics.addEventListener("toggle", () => { info.setAttribute("aria-expanded", String(diagnostics.open)); if (diagnostics.open) refreshGuidance(); });
+  const dismissHelp = (): void => { diagnostics.open = false; syncHelp(); info.focus(); };
+  closeHelp.addEventListener("click", dismissHelp);
+  diagnostics.addEventListener("keydown", event => {
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); dismissHelp(); }
+  });
+  diagnostics.addEventListener("toggle", syncHelp);
   let diagnosticReset: ReturnType<typeof setTimeout> | undefined;
   const volume = el("input", { class: "volume", type: "range", min: "0", max: "100", step: "1", value: String(Math.round(audioPref.volume * 100)) });
   volume.setAttribute("aria-label", "Volume");
   const mute = el("button", { class: "btn sm", type: "button" }, svg(icon("volume", "sm")));
   const unlock = el("button", { class: "audio-unlock", type: "button", hidden: true }, svg(icon("volumeOff", "sm")), "Clique para ativar o som");
   const stage = el("div", { class: "stage" }, video, message, unlock, el("div", { class: "controls" }, el("div", { class: "audio-ctl" }, volume, mute), playerStats, info, fullscreen));
+  stage.addEventListener("fullscreenchange", syncHelp);
+  const actionError = el("div", { class: "watch-action-error", role: "alert", hidden: true });
+  stage.append(actionError);
   stage.dataset.theme = videoTheme();
   const title = el("h2", { textContent: "Assistir" });
   const badge = el("span", { class: "badge", hidden: true });
@@ -503,6 +577,7 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
     if (!options.popout || !session || popout.disabled) return;
     const generation = ++detachGeneration;
     popout.disabled = true;
+    actionError.hidden = true;
     try {
       const handle = await options.popout(stage, displayName);
       if (generation !== detachGeneration || !session) handle.close();
@@ -510,6 +585,8 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
     } catch (error) {
       stateDetail.textContent = error instanceof Error ? error.message : "Não foi possível abrir o mini-player.";
       stateDetail.hidden = false;
+      actionError.textContent = "Não foi possível abrir o mini-player. Tente novamente pelo botão Mini-player.";
+      actionError.hidden = false;
     } finally { popout.disabled = false; }
   });
   if (options.popout) stage.querySelector(".controls")?.append(popout);
@@ -583,7 +660,8 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
   document.addEventListener("pointerdown", onInteract, true);
   document.addEventListener("keydown", onInteract, true);
   unlock.addEventListener("click", onInteract);
-  const leave = el("button", { class: "btn sm", type: "button", textContent: "Sair da transmissão", hidden: true });
+  const leave = el("button", { class: "btn sm", type: "button", textContent: "Sair", title: "Sair desta transmissão", hidden: true });
+  playerTop.append(leave);
   const retry = el("button", { class: "btn primary sm", type: "button", textContent: "Tentar novamente", hidden: true });
   diagnostic.addEventListener("click", async () => {
     if (!session) return;
@@ -658,11 +736,11 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
     retry.hidden = state !== "error";
   };
   const formatStats = (s: WatchStats): string =>
-    `${s.width}×${s.height} · ${s.fps.toFixed(0)} FPS · ${s.mbps.toFixed(1)} Mbps${s.rttMs !== null ? ` · RTT ${s.rttMs.toFixed(0)} ms` : ""}`;
+    `${s.width}×${s.height} · ${s.fps.toFixed(0)} FPS · ${s.mbps.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} Mbps${s.rttMs !== null ? ` · RTT ${s.rttMs.toFixed(0)} ms` : ""}`;
 
   const panel: WatchPanel = {
     getDiagnostics: () => session?.getDiagnostics() ?? null,
-    root: el("div", { class: "stack fade-in watch-panel" }, el("div", { class: "row between watch-panel-head" }, el("div", { class: "row" }, retry, leave)), selfNotice, stage, diagnostics),
+    root: el("div", { class: "stack fade-in watch-panel" }, el("div", { class: "row between watch-panel-head" }, retry), selfNotice, stage, diagnostics),
     setBackgroundMuted(muted) { if (backgroundMuted !== muted) { backgroundMuted = muted; applyAudio(); } },
     watch(friend) {
       panel.stop();
@@ -674,6 +752,8 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
       leave.setAttribute("aria-label", `Sair da transmissão: ${displayName}`);
       diagnostic.setAttribute("aria-label", `Copiar diagnóstico: ${displayName}`);
       info.setAttribute("aria-label", `Ajuda: ${displayName}`);
+      helpTitle.textContent = `Detalhes e ajuda · ${displayName}`;
+      closeHelp.setAttribute("aria-label", `Fechar ajuda: ${displayName}`);
       selfView = options.preview === true || friend.username.toLowerCase() === client.session?.user.username.toLowerCase();
       selfNotice.hidden = !selfView;
       audioKey = `${AUDIO_KEY}.${encodeURIComponent(client.session?.user.id ?? "anonymous")}.${encodeURIComponent(friend.username.toLowerCase())}`;
@@ -697,6 +777,9 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
       session.start();
     },
     stop() {
+      diagnostics.open = false;
+      syncHelp();
+      actionError.hidden = true;
       cancelEndedLeave();
       detachGeneration++;
       detached?.close(); detached = null;
@@ -751,7 +834,9 @@ export function createWatchLayout(client: MadClient, options: WatchOptions & { o
   const slots: HTMLElement[] = [];
   const selectors: HTMLButtonElement[] = [];
   const panels: WatchPanel[] = [];
-  const controls = el("div", { class: "row wrap" });
+  const controls = el("div", { class: "watch-toolbar" });
+  const selection = el("div", { class: "row wrap watch-selection" });
+  const helpHost = el("aside", { class: "watch-help-host", hidden: true, ariaLabel: "Ajuda da transmissão" });
   const add = el("button", { class: "btn sm", type: "button", textContent: "Adicionar transmissão" });
   const swap = el("button", { class: "btn sm", type: "button", textContent: "Trocar destaque", title: "Trocar destaque (D)" });
   const equal = el("button", { class: "btn sm", type: "button", textContent: "Lado a lado" });
@@ -787,14 +872,16 @@ export function createWatchLayout(client: MadClient, options: WatchOptions & { o
     swap.hidden = equal.hidden = audioLabel.hidden = count < 2;
     equal.setAttribute("aria-pressed", String(featured === null));
     hint.hidden = count < 2;
-    hint.textContent = `Selecionada: Tela ${selected + 1} · ${names[selected]}. A próxima transmissão substitui esta tela. Atalhos: M para som, F para tela cheia e D para destaque.`;
+    hint.textContent = "A próxima transmissão substitui a tela marcada. Atalhos: D destaque, M som, F tela cheia.";
     add.hidden = count === 0 || !options.onAdd;
     for (let index = 0; index < 2; index++) {
       slots[index]!.hidden = users[index] === null;
       slots[index]!.classList.toggle("selected", index === selected);
       selectors[index]!.hidden = users[index] === null;
-      selectors[index]!.textContent = count === 1 ? "Assistindo · 1 de 2" : `Tela ${index + 1}`;
-      selectors[index]!.setAttribute("aria-pressed", String(index === selected));
+      selectors[index]!.textContent = count === 1 ? `Assistindo · ${names[index]}` : `Tela ${index + 1} · ${names[index]}`;
+      // Com uma live não há o que escolher: o botão só identifica quem está na tela.
+      if (count === 2) selectors[index]!.setAttribute("aria-pressed", String(index === selected));
+      else selectors[index]!.removeAttribute("aria-pressed");
       selectors[index]!.setAttribute("aria-label", `Selecionar Tela ${index + 1}: ${names[index]}${index === selected ? " (selecionada)" : ""}`);
       slots[index]!.setAttribute("aria-label", `Tela ${index + 1}: ${names[index]}${index === selected ? " (selecionada)" : ""}`);
       panels[index]!.setBackgroundMuted(count === 2 && onlyFeaturedAudio && index !== (featured ?? selected));
@@ -855,10 +942,13 @@ export function createWatchLayout(client: MadClient, options: WatchOptions & { o
   };
   document.addEventListener("keydown", onLayoutKey);
   for (let index = 0; index < 2; index++) {
-    const selector = el("button", { class: "btn sm", type: "button", textContent: `Tela ${index + 1}` });
+    const selector = el("button", { class: "btn sm watch-selector", type: "button", textContent: `Tela ${index + 1}` });
     selector.addEventListener("click", () => { selected = index; update(); });
-    selectors.push(selector); controls.append(selector);
+    selectors.push(selector); selection.append(selector);
     const panel = createWatchPanel(client, {
+      helpHost,
+      // A ajuda abre do lado oposto ao da pessoa, para que o vídeo e os controles dela continuem à vista.
+      onHelpShown: () => { helpHost.dataset.side = index === 1 && users.every(Boolean) ? "start" : "end"; },
       ...(options.popout ? { popout: options.popout } : {}),
       ...(options.toggleFullscreen ? { toggleFullscreen: options.toggleFullscreen } : {}),
       ...(options.preview !== undefined ? { preview: options.preview } : {}),
@@ -891,7 +981,9 @@ export function createWatchLayout(client: MadClient, options: WatchOptions & { o
     slots.push(slot); grid.append(slot);
     if (index === 0) grid.append(divider);
   }
-  controls.append(swap, equal, audioLabel, add);
+  // A ajuda fica sobre as telas, sem cobrir a barra de troca e destaque, e vem depois delas no foco.
+  grid.append(helpHost);
+  controls.append(selection, el("div", { class: "row wrap watch-layout-actions" }, swap, equal, audioLabel, add));
   update();
   return {
     getDiagnostics: () => panels.map(panel => panel.getDiagnostics()),

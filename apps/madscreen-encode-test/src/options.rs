@@ -316,6 +316,30 @@ pub struct Options {
     /// Laboratorio: reducao box superamostrada 4x4 no shader, bilinear por padrao.
     #[arg(long)]
     pub reduction_box: bool,
+    /// Laboratorio: força bilinear na redução, mesmo se o padrão mudar após qualificação.
+    #[arg(long, conflicts_with = "reduction_box")]
+    pub reduction_bilinear: bool,
+    /// Ajuste experimental da captura por carga; desativado por padrão.
+    #[arg(long)]
+    pub load_governor: bool,
+    /// Laboratorio: desliga o governador mesmo nos backends de compatibilidade.
+    #[arg(long, conflicts_with = "load_governor")]
+    pub no_load_governor: bool,
+    /// Readback staging atrasado em um quadro nos backends FFmpeg; desativado por padrão.
+    #[arg(long)]
+    pub async_readback: bool,
+    /// Laboratorio: desliga o readback assincrono no backend de compatibilidade.
+    #[arg(long, conflicts_with = "async_readback")]
+    pub no_async_readback: bool,
+    /// Laboratorio: numero de quadros VBV do QSV/x264 (1 desliga o aumento).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=8))]
+    pub compat_vbv_frames: Option<u32>,
+    /// Laboratorio: volta ao preset x264 ultrafast.
+    #[arg(long, conflicts_with = "x264_superfast")]
+    pub x264_ultrafast: bool,
+    /// Laboratorio: pede preset x264 superfast ate 30 fps.
+    #[arg(long, conflicts_with = "x264_ultrafast")]
+    pub x264_superfast: bool,
     #[arg(long, value_enum, default_value = "nv12")]
     pub input: InputArg,
     #[arg(long)]
@@ -370,7 +394,10 @@ pub struct Options {
     /// Se AV1 não existir na GPU, usa HEVC e registra codec efetivo.
     #[arg(long)]
     pub fallback_hevc: bool,
-    #[arg(long, value_enum, default_value = "disabled")]
+    /// NVENC: duas passagens com a primeira em 1/4 da resolução. Padrão desde 7/nov/2026: pela
+    /// taxa real economiza 10–65% de banda na mesma qualidade e respeita o orçamento por quadro
+    /// (`docs/bench/idr-convergencia-2026-11-07.md`); `disabled` é o retorno.
+    #[arg(long, value_enum, default_value = "quarter-res")]
     pub multipass: MultiPassArg,
     /// Laboratorio NVENC: AQ espacial; nao habilita lookahead ou AQ temporal.
     #[arg(long)]
@@ -441,6 +468,19 @@ pub struct Options {
     pub identity: String,
 }
 impl Options {
+    pub fn governor_enabled(
+        &self,
+        kind: madscreen_encode::backend::BackendKind,
+        compat_tuning: bool,
+    ) -> bool {
+        // Com qualquer backend o governador reage à banda (encoder acima da estimativa do
+        // WebRTC). Os sinais de CPU/fila só valem nos backends de compatibilidade ou com opt-in.
+        let _ = kind;
+        compat_tuning && !self.no_load_governor
+    }
+    pub fn governor_cpu_signals(&self, kind: madscreen_encode::backend::BackendKind) -> bool {
+        self.load_governor || madscreen_encode::config::compatibility_backend(kind)
+    }
     pub fn from_cli_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
         let mut options = <Self as clap::FromArgMatches>::from_arg_matches(matches)?;
         options.bitrate_auto =
@@ -487,7 +527,25 @@ impl Options {
             vbv_frames: self.vbv_frames,
             preset,
             spatial_aq: self.spatial_aq,
-            readback_metrics: self.readback_metrics,
+            // O diagnóstico da publicação também precisa dos tempos (só Instant::now por estágio).
+            readback_metrics: self.readback_metrics || (self.diagnostics && self.publishing()),
+            async_readback: false,
+            compat_tuning: compat_tuning_enabled(),
+            compat_vbv_frames: self.compat_vbv_frames,
+            async_readback_override: if self.async_readback {
+                Some(true)
+            } else if self.no_async_readback {
+                Some(false)
+            } else {
+                None
+            },
+            x264_screen_preset_override: if self.x264_superfast {
+                Some(true)
+            } else if self.x264_ultrafast {
+                Some(false)
+            } else {
+                None
+            },
             multipass: match self.multipass {
                 MultiPassArg::Disabled => MultiPass::Disabled,
                 MultiPassArg::QuarterRes => MultiPass::QuarterRes,
@@ -500,6 +558,11 @@ impl Options {
         c.validate()?;
         Ok(c)
     }
+}
+
+/// The process-wide return switch is sampled once, before backend selection.
+pub fn compat_tuning_enabled() -> bool {
+    madscreen_encode::config::compat_tuning_enabled()
 }
 
 fn parse_profile_level_id(value: &str) -> Result<String, String> {
@@ -519,6 +582,64 @@ mod tests {
         assert!(matches!(defaults.sync, SyncArg::Flush));
         assert!(matches!(defaults.gpu_priority, PriorityArg::AboveNormal));
         assert!(matches!(defaults.synthetic, SyntheticArg::Animated));
+        assert!(!defaults.load_governor);
+        assert!(!defaults.async_readback);
+        assert!(!defaults.reduction_box);
+        assert!(!defaults.reduction_bilinear);
+        assert!(!defaults.config(1920, 1080, Preset::P1)?.async_readback);
+        let experimental = Options::try_parse_from([
+            "encode",
+            "--load-governor",
+            "--async-readback",
+            "--reduction-box",
+        ])?;
+        assert!(experimental.load_governor);
+        assert_eq!(
+            experimental
+                .config(1920, 1080, Preset::P1)?
+                .async_readback_override,
+            Some(true)
+        );
+        assert!(experimental.reduction_box);
+        assert!(
+            Options::try_parse_from(["encode", "--reduction-box", "--reduction-bilinear",])
+                .is_err()
+        );
+        assert!(madscreen_encode::config::compat_tuning_from_value(None));
+        assert!(madscreen_encode::config::compat_tuning_from_value(Some(
+            "ON"
+        )));
+        assert!(!madscreen_encode::config::compat_tuning_from_value(Some(
+            "off"
+        )));
+        assert!(!madscreen_encode::config::compat_tuning_from_value(Some(
+            "OFF"
+        )));
+        let compat = madscreen_encode::backend::BackendKind::X264;
+        let nvenc = madscreen_encode::backend::BackendKind::Nvenc;
+        assert!(defaults.governor_enabled(compat, true));
+        assert!(defaults.governor_enabled(nvenc, true));
+        assert!(!defaults.governor_enabled(compat, false));
+        assert!(experimental.governor_enabled(nvenc, true));
+        assert!(defaults.governor_cpu_signals(compat));
+        assert!(!defaults.governor_cpu_signals(nvenc));
+        assert!(experimental.governor_cpu_signals(nvenc));
+        let disabled = Options::try_parse_from([
+            "encode",
+            "--no-load-governor",
+            "--no-async-readback",
+            "--compat-vbv-frames",
+            "1",
+            "--x264-ultrafast",
+        ])?;
+        assert!(!disabled.governor_enabled(compat, true));
+        let disabled_config = disabled.config(1920, 1080, Preset::P1)?;
+        assert_eq!(disabled_config.async_readback_override, Some(false));
+        assert_eq!(disabled_config.compat_vbv_frames, Some(1));
+        assert_eq!(disabled_config.x264_screen_preset_override, Some(false));
+        for invalid in ["0", "9"] {
+            assert!(Options::try_parse_from(["encode", "--compat-vbv-frames", invalid]).is_err());
+        }
         let forced =
             Options::try_parse_from(["encode", "--capture-backend", "desktop-duplication"])?;
         assert_eq!(

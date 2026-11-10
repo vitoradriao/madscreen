@@ -9,10 +9,14 @@ macro_rules! reportln {
     };
 }
 
+#[cfg(windows)]
+mod cpu_ffi;
 #[cfg(any(windows, test))]
 mod ipc;
 #[cfg(windows)]
 mod limits;
+#[cfg(windows)]
+mod load_governor;
 #[cfg(any(windows, test))]
 mod options;
 #[cfg(windows)]
@@ -38,6 +42,7 @@ fn main() -> anyhow::Result<()> {
     use clap::CommandFactory;
     let matches = options::Options::command().get_matches();
     let mut options = options::Options::from_cli_matches(&matches)?;
+    let compat_tuning = options::compat_tuning_enabled();
     options.height_choice = options.height;
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -45,6 +50,7 @@ fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+    tracing::info!(compat_tuning, "Política dos backends de compatibilidade");
     if options.list_sources {
         let list = sources::list(options.exclude_pid, options.monitors_only)?;
         println!("{}", serde_json::to_string(&list)?);

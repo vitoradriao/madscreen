@@ -145,4 +145,47 @@ async function flush() { for (let i = 0; i < 10; i++) await Promise.resolve(); }
   ctl.dispose();
 }
 
+// Recurso descartado no lado nativo ("resource id N is invalid"): consulta de novo e tenta uma vez.
+{
+  const log = [];
+  const stale = fakeUpdate("0.1.7", log);
+  stale.download = async () => { throw new Error("The resource id 398043307 is invalid."); };
+  const fresh = fakeUpdate("0.1.7", log);
+  const answers = [stale, fresh];
+  const ctl = createUpdateController({ check: async () => answers.shift(), prepareInstall: async () => {} }, fakeTimers());
+  await ctl.check(true);
+  await ctl.install();
+  await flush();
+  assert.deepEqual(log, ["download 0.1.7", "install 0.1.7 restart=true"]);
+  assert.equal(stale.closed, true);
+  ctl.dispose();
+}
+
+// Consulta que termina durante o download não troca nem fecha o recurso em uso.
+{
+  const log = [];
+  const current = fakeUpdate("0.1.7", log);
+  let release;
+  current.download = () => new Promise(resolve => { release = resolve; });
+  let answer = current;
+  let finishCheck;
+  const ctl = createUpdateController({
+    check: () => answer === current ? Promise.resolve(current) : new Promise(resolve => { finishCheck = () => resolve(null); }),
+    prepareInstall: async () => {},
+  }, fakeTimers());
+  await ctl.check(true);
+  answer = null;
+  const pendingCheck = ctl.check(false);
+  void ctl.install();
+  await flush();
+  finishCheck();
+  await pendingCheck;
+  await flush();
+  assert.equal(current.closed, false);
+  release();
+  await flush();
+  assert.equal(ctl.status.kind, "installing");
+  ctl.dispose();
+}
+
 console.log("updates: ok");

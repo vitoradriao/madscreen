@@ -5,10 +5,13 @@ use crate::{
 use anyhow::{Context, Result};
 use madscreen_capture::{CaptureOptions, CaptureStats, source::CaptureSource, wgc::GpuDevice};
 use madscreen_encode::{
-    AuBuffer, Encoder, EncoderConfig, FrameTiming, Preset, VideoCodec,
+    AuBuffer, Encoder, EncoderConfig, FrameRate, FrameTiming, Preset, VideoCodec,
     auto::AutoEncoder,
+    backend::BackendKind,
     bitstream::{AnnexBWriter, IvfWriter},
-    convert::{ConvertMode, Converter, InputFormat, SyntheticSource},
+    convert::{
+        ConvertMode, Converter, InputFormat, SyntheticSource, reduction::ReductionPreference,
+    },
     nvenc,
     pacer::Pacer,
     pipeline::{FlightSlots, capture_due},
@@ -31,6 +34,127 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+fn reduction_preference(
+    options: &Options,
+    kind: madscreen_encode::backend::BackendKind,
+    compat_tuning: bool,
+    shader_available: bool,
+) -> ReductionPreference {
+    if !compat_tuning {
+        ReductionPreference::Automatic
+    } else if options.reduction_box {
+        ReductionPreference::Box4x4
+    } else if options.reduction_bilinear {
+        ReductionPreference::Bilinear
+    } else if madscreen_encode::config::compatibility_backend(kind) && shader_available {
+        ReductionPreference::Box4x4
+    } else {
+        ReductionPreference::Automatic
+    }
+}
+
+/// Instante de captura de um quadro enviado agora. Repetição do mesmo quadro (IDR de repouso,
+/// refino de tela parada) recebe o instante do reenvio: o timestamp vai ao RTP e, com o da
+/// captura original, voltaria segundos no tempo (o LiveKit não força monotonia).
+fn presented_capture_qpc(frame_qpc: i64, last_captured_qpc: Option<i64>, now_qpc: i64) -> i64 {
+    if last_captured_qpc.is_some_and(|last| frame_qpc <= last) {
+        now_qpc
+    } else {
+        frame_qpc
+    }
+}
+
+/// Taxa de um encoder recriado na troca de resolução: a aplicada pelo WebRTC, nunca acima do teto.
+fn rebuild_bitrate_bps(cap_bps: u32, applied_bps: Option<u32>) -> u32 {
+    applied_bps.map_or(cap_bps, |applied| applied.clamp(1, cap_bps))
+}
+
+fn tuning_decision(
+    active: bool,
+    reason: &'static str,
+) -> madscreen_ipc::diagnostics::TuningDecision {
+    madscreen_ipc::diagnostics::TuningDecision {
+        active,
+        reason: reason.into(),
+    }
+}
+
+fn restore_capture_cadence(
+    capture: &Option<CaptureSource>,
+    options: &mut CaptureOptions,
+    capture_fps: &mut FrameRate,
+    capture_period: &mut i64,
+    configured_fps: FrameRate,
+    capture_limit: bool,
+    frequency: i64,
+) {
+    *capture_fps = configured_fps;
+    *capture_period = (i128::from(frequency) * i128::from(configured_fps.den)
+        / i128::from(configured_fps.num.max(1)))
+    .clamp(1, i128::from(i64::MAX)) as i64;
+    options.target_fps = capture_limit.then(|| configured_fps.as_f64().ceil() as u32);
+    if let Some(source) = capture {
+        source.set_target_fps(options.target_fps);
+    }
+}
+
+#[cfg(test)]
+mod compatibility_policy_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn repeated_frame_is_stamped_when_sent_again() {
+        // Quadro novo conserva o instante de captura (latência real).
+        assert_eq!(presented_capture_qpc(1_000, None, 5_000), 1_000);
+        assert_eq!(presented_capture_qpc(2_000, Some(1_000), 5_000), 2_000);
+        // Repetição do mesmo quadro (refino/IDR de repouso) sai com o instante do reenvio.
+        assert_eq!(presented_capture_qpc(2_000, Some(2_000), 180_000), 180_000);
+        assert_eq!(presented_capture_qpc(1_500, Some(2_000), 180_000), 180_000);
+    }
+
+    #[test]
+    fn rebuilt_encoder_keeps_the_rate_webrtc_applied() {
+        // Rede sustentando 3 Mbps sob teto de 7 Mbps (1080p30 automático).
+        assert_eq!(rebuild_bitrate_bps(7_000_000, Some(3_000_000)), 3_000_000);
+        assert_eq!(rebuild_bitrate_bps(7_000_000, Some(9_000_000)), 7_000_000);
+        // Sem publicação (laboratório local) conserva o teto.
+        assert_eq!(rebuild_bitrate_bps(7_000_000, None), 7_000_000);
+        assert_eq!(rebuild_bitrate_bps(7_000_000, Some(0)), 1);
+    }
+
+    #[test]
+    fn default_filter_keeps_nvenc_amf_and_enables_compatibility_only() -> Result<()> {
+        let options = Options::try_parse_from(["encode"])?;
+        for kind in [BackendKind::Nvenc, BackendKind::Amf] {
+            assert_eq!(
+                reduction_preference(&options, kind, true, true),
+                ReductionPreference::Automatic
+            );
+        }
+        for kind in [
+            BackendKind::X264,
+            BackendKind::Qsv,
+            BackendKind::Mf,
+            BackendKind::OpenH264,
+        ] {
+            assert_eq!(
+                reduction_preference(&options, kind, true, true),
+                ReductionPreference::Box4x4
+            );
+            assert_eq!(
+                reduction_preference(&options, kind, false, true),
+                ReductionPreference::Automatic
+            );
+            assert_eq!(
+                reduction_preference(&options, kind, true, false),
+                ReductionPreference::Automatic
+            );
+        }
+        Ok(())
+    }
+}
 
 pub fn run(options: Options) -> Result<()> {
     let _runtime = platform::Runtime::new()?;
@@ -287,11 +411,22 @@ fn publish_diagnostic(
 }
 
 impl Output {
-    fn new(options: &Options, preset: Preset, config: &EncoderConfig) -> Result<Self> {
+    fn new(
+        options: &Options,
+        preset: Preset,
+        config: &EncoderConfig,
+        governor_enabled: bool,
+        governor_cpu_signals: bool,
+    ) -> Result<Self> {
+        #[cfg(not(feature = "publish"))]
+        let _ = (governor_enabled, governor_cpu_signals);
         if options.publishing() {
             #[cfg(feature = "publish")]
             return Ok(Self::Live(Box::new(crate::publish::Live::connect(
-                options, config,
+                options,
+                config,
+                governor_enabled,
+                governor_cpu_signals,
             )?)));
             #[cfg(not(feature = "publish"))]
             anyhow::bail!("publicação exige compilar com --features publish");
@@ -366,6 +501,35 @@ impl Output {
         match self {
             #[cfg(feature = "publish")]
             Self::Live(live) => live.diagnostic_sample(),
+            _ => None,
+        }
+    }
+    fn governor_tick(
+        &mut self,
+        at_ms: u64,
+        captured: u64,
+        submitted: u64,
+        process_cpu_cores: Option<f64>,
+    ) -> Option<crate::load_governor::Target> {
+        #[cfg(not(feature = "publish"))]
+        let _ = (at_ms, captured, submitted, process_cpu_cores);
+        match self {
+            #[cfg(feature = "publish")]
+            Self::Live(live) => live.governor_tick(at_ms, captured, submitted, process_cpu_cores),
+            _ => None,
+        }
+    }
+    fn disable_governor(&mut self) {
+        match self {
+            #[cfg(feature = "publish")]
+            Self::Live(live) => live.disable_governor(),
+            _ => {}
+        }
+    }
+    fn applied_bitrate_bps(&self) -> Option<u32> {
+        match self {
+            #[cfg(feature = "publish")]
+            Self::Live(live) => Some(live.applied_bitrate_bps()),
             _ => None,
         }
     }
@@ -549,14 +713,15 @@ pub(crate) fn run_profile(
     }
     let frame_event = Arc::new(platform::FrameEvent::new()?);
     let notify = frame_event.clone();
-    let capture_options = CaptureOptions {
+    let mut capture_options = CaptureOptions {
         target_fps: options
             .capture_limit
             .then(|| options.fps.as_f64().ceil() as u32),
         ..Default::default()
     };
+    let capture_notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || notify.signal());
     let mut capture = if target.is_some() || item.is_some() {
-        let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || notify.signal());
+        let notify = capture_notify.clone();
         // FrameSource::start recria o device. Esta entrada aditiva mantém o mesmo device para NVENC.
         let source = if let Some(item) = item {
             CaptureSource::start_item(gpu.clone(), item, capture_options, notify)
@@ -677,6 +842,7 @@ pub(crate) fn run_profile(
         tracing::warn!("AV1 indisponível; perfil usará HEVC");
         config.codec = VideoCodec::Hevc;
     }
+    let base_config = config.clone();
     let input = match options.input {
         InputArg::Nv12 => InputFormat::Nv12,
         InputArg::Bgra => InputFormat::Bgra,
@@ -688,7 +854,6 @@ pub(crate) fn run_profile(
     let ring_size = (options.inflight as usize + 1).max(4);
     let mut converter = Converter::new_ring(&gpu, source_size, &config, mode, input, ring_size)?;
     converter.set_query_delay(options.gpu_query_delay_ms);
-    converter.set_box_reduction(options.reduction_box)?;
     let effective_mode = match converter.effective_mode() {
         ConvertMode::Shader => "shader",
         ConvertMode::VideoProcessor => "vp",
@@ -704,7 +869,27 @@ pub(crate) fn run_profile(
         input == InputFormat::Bgra,
         options.encoder.requested(),
     )?;
-    let encoder_kind = encoder.kind();
+    let mut encoder_kind = encoder.kind();
+    config = madscreen_encode::config::effective_config(encoder_kind, &config);
+    let mut governor_enabled =
+        options.publishing() && options.governor_enabled(encoder_kind, config.compat_tuning);
+    let selected_reduction_preference = reduction_preference(
+        options,
+        encoder_kind,
+        config.compat_tuning,
+        matches!(converter.effective_mode(), ConvertMode::Shader),
+    );
+    converter.set_reduction_preference(selected_reduction_preference)?;
+    let governor_cpu_signals = options.governor_cpu_signals(encoder_kind);
+    // Só o governador de CPU limita a captura ao FPS alvo; no NVENC (só banda) a captura
+    // segue como antes e o limite entra apenas quando um degrau for aplicado.
+    if governor_enabled && governor_cpu_signals {
+        let target_fps = config.fps.as_f64().ceil() as u32;
+        capture_options.target_fps = Some(target_fps);
+        if let Some(source) = &capture {
+            source.set_target_fps(Some(target_fps));
+        }
+    }
     reportln!(options.ipc; "Encoder selecionado: {}", encoder_kind.name());
     if let Some(actual) = encoder.bitstream_profile_level_id() {
         reportln!(options.ipc; "SPS do encoder: profile-level-id {actual}");
@@ -766,13 +951,24 @@ pub(crate) fn run_profile(
     let frequency = qpc_frequency()?;
     let timer = Timer::new()?;
     let mut sampling = Sampling::new(options.warmup, adapter.name.clone())?;
+    // CPU do engine por amostra de diagnóstico; a primeira cobre desde o início da sessão.
+    let mut process_cpu = crate::cpu_ffi::ProcessCpu::new();
+    let mut governor_cpu = crate::cpu_ffi::ProcessCpu::new();
+    let logical_cpus = std::thread::available_parallelism().map_or(1., |n| n.get() as f64);
     let start = qpc()?;
     let mut pacer = Pacer::new(start, frequency, config.fps)?;
     let mut collector = Collector {
         discard_output: false,
         keyframe_accepted: false,
         au: AuBuffer::new(config.au_capacity()),
-        output: Output::new(options, preset, &config).map_err(|error| {
+        output: Output::new(
+            options,
+            preset,
+            &config,
+            governor_enabled,
+            governor_cpu_signals,
+        )
+        .map_err(|error| {
             let error = if options.publishing() {
                 publish_diagnostic(error, encoder_kind.name(), &config)
             } else {
@@ -806,10 +1002,17 @@ pub(crate) fn run_profile(
     let mut saturation = madscreen_encode::pipeline::Saturation::default();
     let mut throttled = 0u64;
     let mut last_capture_encode: Option<i64> = None;
+    // Captura do último quadro entregue pela fonte, para distinguir repetição de quadro novo.
+    let mut last_captured_qpc: Option<i64> = None;
+    let mut capture_fps = config.fps;
     // Período em ticks do QPC para a grade de captura (FPS pedido).
-    let capture_period = (i128::from(frequency) * i128::from(config.fps.den)
-        / i128::from(config.fps.num.max(1)))
+    let mut capture_period = (i128::from(frequency) * i128::from(capture_fps.den)
+        / i128::from(capture_fps.num.max(1)))
     .clamp(1, i128::from(i64::MAX)) as i64;
+    let mut governor_last_ms = 0u64;
+    let mut governor_last_captured = 0u64;
+    let mut governor_last_submitted = 0u64;
+    let mut pending_resolution: Option<Size> = None;
     let mut capture_pending = false;
     let mut redraw = false;
     let mut next_window_check = start;
@@ -880,6 +1083,9 @@ pub(crate) fn run_profile(
         {
             collector.measured_start = Some(now);
             capture_baseline = capture_stats(&capture)?;
+            governor_last_captured = capture_baseline.map_or(0, |stats| stats.frames);
+            governor_last_submitted = produced;
+            governor_cpu = crate::cpu_ffi::ProcessCpu::new();
             skipped = 0;
             late = 0;
             collector.gpu_metrics_unavailable = 0;
@@ -964,6 +1170,29 @@ pub(crate) fn run_profile(
             redraw = true;
         }
         occupancy.observe(qpc()?, slots.count());
+        if capture
+            .as_ref()
+            .is_some_and(CaptureSource::needs_wgc_switch)
+            && let Some(target) = target
+        {
+            // HDR ligado durante a live com Desktop Duplication: mesmo monitor via WGC, sem
+            // encerrar a sessão. Contadores de captura recomeçam na fonte nova.
+            if let Some(mut previous) = capture.take() {
+                previous.stop();
+            }
+            let replacement = CaptureSource::start(
+                gpu.clone(),
+                target,
+                capture_options,
+                madscreen_capture::CaptureBackend::Wgc,
+                capture_notify.clone(),
+            )
+            .context(crate::ipc::FailureStage(madscreen_ipc::ErrorCode::Capture))?;
+            reportln!(options.ipc; "HDR ligado no monitor: captura trocada para {}", replacement.backend_name());
+            capture = Some(replacement);
+            capture_pending = true;
+            redraw = true;
+        }
         if let Some(source) = &capture {
             if let Some(error) = source.take_error() {
                 return Err(anyhow::Error::new(error)
@@ -986,19 +1215,109 @@ pub(crate) fn run_profile(
                 break;
             }
         }
+        if let Some(desired) = pending_resolution
+            && slots.count() == 0
+            && conversions.is_empty()
+        {
+            let mut requested_config = base_config.clone();
+            requested_config.width = desired.width;
+            requested_config.height = desired.height;
+            // O publicador não é avisado da recriação: abrir no teto inicial passaria da banda
+            // que o WebRTC está permitindo até a estimativa cair de novo.
+            requested_config.bitrate_bps = rebuild_bitrate_bps(
+                base_config.bitrate_bps,
+                collector.output.applied_bitrate_bps(),
+            );
+            let rebuilt = (|| -> Result<(Converter, AutoEncoder, EncoderConfig)> {
+                requested_config.validate()?;
+                let mut next_converter = Converter::new_ring(
+                    &gpu,
+                    source_size,
+                    &requested_config,
+                    mode,
+                    input,
+                    ring_size,
+                )?;
+                next_converter.set_query_delay(options.gpu_query_delay_ms);
+                let next_encoder = AutoEncoder::new(
+                    &gpu,
+                    requested_config.clone(),
+                    next_converter.textures(),
+                    input == InputFormat::Bgra,
+                    options.encoder.requested(),
+                )?;
+                let effective = madscreen_encode::config::effective_config(
+                    next_encoder.kind(),
+                    &requested_config,
+                );
+                let preference = reduction_preference(
+                    options,
+                    next_encoder.kind(),
+                    effective.compat_tuning,
+                    matches!(next_converter.effective_mode(), ConvertMode::Shader),
+                );
+                next_converter.set_reduction_preference(preference)?;
+                Ok((next_converter, next_encoder, effective))
+            })();
+            match rebuilt {
+                Ok((next_converter, next_encoder, effective)) => {
+                    converter = next_converter;
+                    encoder = next_encoder;
+                    encoder_kind = encoder.kind();
+                    config = effective;
+                    if !options.governor_enabled(encoder_kind, config.compat_tuning) {
+                        collector.output.disable_governor();
+                        governor_enabled = false;
+                        restore_capture_cadence(
+                            &capture,
+                            &mut capture_options,
+                            &mut capture_fps,
+                            &mut capture_period,
+                            base_config.fps,
+                            options.capture_limit,
+                            frequency,
+                        );
+                    }
+                    capture_pending = true;
+                    redraw = true;
+                    last_capture_encode = None;
+                    tracing::info!(
+                        width = config.width,
+                        height = config.height,
+                        "Saída do encoder recriada após troca de resolução"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Troca de resolução falhou; mantendo encoder anterior e desligando ajuste automático");
+                    collector.output.disable_governor();
+                    governor_enabled = false;
+                    restore_capture_cadence(
+                        &capture,
+                        &mut capture_options,
+                        &mut capture_fps,
+                        &mut capture_period,
+                        base_config.fps,
+                        options.capture_limit,
+                        frequency,
+                    );
+                }
+            }
+            pending_resolution = None;
+        }
         let due = if privacy_draining {
             false
         } else if neutral {
             capture_pending = true;
-            capture_due(now, last_capture_encode, frequency, config.fps)
+            capture_due(now, last_capture_encode, frequency, capture_fps)
+                && pending_resolution.is_none()
         } else if capture.is_some() {
             let notified = frame_event.wait(0)?;
             capture_pending |= notified;
-            let due = capture_due(now, last_capture_encode, frequency, config.fps);
+            let due = capture_due(now, last_capture_encode, frequency, capture_fps);
             if notified && !due && collector.measured_start.is_some() {
                 throttled += 1;
             }
-            capture_pending && due
+            capture_pending && due && pending_resolution.is_none()
         } else {
             now >= pacer.deadline()
         };
@@ -1045,8 +1364,14 @@ pub(crate) fn run_profile(
                             .frame()
                             .filter(|frame| frame.qpc_acquired >= minimum_acquisition_qpc)
                         {
-                            timing.qpc_capture = frame.qpc_capture;
-                            timing.qpc_convert_start = qpc()?;
+                            let now_qpc = qpc()?;
+                            timing.qpc_capture = presented_capture_qpc(
+                                frame.qpc_capture,
+                                last_captured_qpc,
+                                now_qpc,
+                            );
+                            last_captured_qpc = Some(frame.qpc_capture);
+                            timing.qpc_convert_start = now_qpc;
                             converter.begin_frame(slot);
                             converter.begin_convert(slot);
                             converter.submit(frame, slot)?;
@@ -1109,6 +1434,56 @@ pub(crate) fn run_profile(
             saturation.observe(now, false);
         }
         occupancy.observe(qpc()?, slots.count());
+        // Sem captura (fonte sintética de laboratório) a contagem cai para os quadros submetidos.
+        if governor_enabled && collector.measured_start.is_some() {
+            let at_ms = (elapsed * 1000.) as u64;
+            if at_ms.saturating_sub(governor_last_ms) >= 1000 {
+                let captured_total = capture_stats(&capture)?.map_or(0, |stats| stats.frames);
+                let submitted = produced.saturating_sub(governor_last_submitted);
+                // Static redraw/refinement can submit without a new WGC frame.
+                let captured = captured_total
+                    .saturating_sub(governor_last_captured)
+                    .max(submitted);
+                let process_cpu_cores = governor_cpu
+                    .sample()
+                    .map(|percent| percent * logical_cpus / 100.);
+                let changed =
+                    collector
+                        .output
+                        .governor_tick(at_ms, captured, submitted, process_cpu_cores);
+                governor_last_ms = at_ms;
+                governor_last_captured = captured_total;
+                governor_last_submitted = produced;
+                if let Some(target) = changed {
+                    capture_fps = FrameRate::new(target.fps, 1)?;
+                    capture_period = (i128::from(frequency) * i128::from(capture_fps.den)
+                        / i128::from(capture_fps.num))
+                    .clamp(1, i128::from(i64::MAX)) as i64;
+                    capture_options.target_fps = Some(target.fps);
+                    if let Some(source) = &capture {
+                        source.set_target_fps(Some(target.fps));
+                    }
+                    last_capture_encode = None;
+                    let desired = match target.resolution {
+                        crate::load_governor::ResolutionStep::Native => Size {
+                            width: base_config.width,
+                            height: base_config.height,
+                        },
+                        crate::load_governor::ResolutionStep::Hd720 => Size {
+                            width: ((u64::from(base_config.width) * 720
+                                / u64::from(base_config.height))
+                                as u32)
+                                & !1,
+                            height: 720,
+                        },
+                    };
+                    if desired.width != config.width || desired.height != config.height {
+                        pending_resolution = Some(desired);
+                    }
+                    tracing::info!(fps = target.fps, ?target.resolution, "Degrau de captura ajustado");
+                }
+            }
+        }
         if collector.measured_start.is_some()
             && elapsed - last_stats >= f64::from(options.stats_interval)
         {
@@ -1129,6 +1504,77 @@ pub(crate) fn run_profile(
                 }
                 sample.pacing_intervals_skipped = skipped;
                 sample.inflight = slots.count();
+                sample.encoder = Some(encoder_kind.id().into());
+                sample.output_width = Some(config.width);
+                sample.output_height = Some(config.height);
+                sample.fps_target = Some(config.fps.as_f64());
+                sample.vbv_frames = Some(config.vbv_frames);
+                sample.process_cpu_percent = process_cpu.sample();
+                sample.reduction_filter = Some(converter.reduction_filter().name().into());
+                let compatibility = madscreen_encode::config::compatibility_backend(encoder_kind);
+                let rollback = !config.compat_tuning;
+                let screen_active = !rollback
+                    && (encoder_kind == BackendKind::Qsv
+                        || (encoder_kind == BackendKind::X264
+                            && config.fps.as_f64() <= 30.
+                            && config.x264_screen_preset_override != Some(false)));
+                sample.screen_preset_tuning = Some(tuning_decision(
+                    screen_active,
+                    if rollback {
+                        "MADSCREEN_COMPAT_TUNING=off"
+                    } else if screen_active {
+                        "politica de compatibilidade"
+                    } else {
+                        "backend/FPS ou override nao elegivel"
+                    },
+                ));
+                let vbv_active = !rollback
+                    && matches!(encoder_kind, BackendKind::X264 | BackendKind::Qsv)
+                    && config.vbv_frames > 1;
+                sample.compat_vbv_tuning = Some(tuning_decision(
+                    vbv_active,
+                    if rollback {
+                        "MADSCREEN_COMPAT_TUNING=off"
+                    } else if vbv_active {
+                        "VBV efetivo do backend"
+                    } else {
+                        "backend excluido ou override de 1 quadro"
+                    },
+                ));
+                sample.load_governor_tuning = Some(tuning_decision(
+                    governor_enabled,
+                    if rollback {
+                        "MADSCREEN_COMPAT_TUNING=off"
+                    } else if governor_enabled {
+                        "compatibilidade ou opt-in CLI"
+                    } else {
+                        "backend excluido, opt-out ou falha de recriacao"
+                    },
+                ));
+                sample.async_readback_tuning = Some(tuning_decision(
+                    config.async_readback,
+                    if rollback {
+                        "MADSCREEN_COMPAT_TUNING=off"
+                    } else if config.async_readback {
+                        "compatibilidade ou opt-in CLI"
+                    } else {
+                        "NVENC/AMF ou opt-out CLI"
+                    },
+                ));
+                let box_active = converter.reduction_filter()
+                    == madscreen_encode::convert::reduction::ReductionFilter::Box4x4;
+                sample.reduction_box_tuning = Some(tuning_decision(
+                    box_active,
+                    if rollback {
+                        "MADSCREEN_COMPAT_TUNING=off"
+                    } else if box_active {
+                        "reducao shader no backend elegivel"
+                    } else if !compatibility {
+                        "NVENC/AMF"
+                    } else {
+                        "resolucao nativa, VP ou opt-out CLI"
+                    },
+                ));
                 if let Some(file) = &mut diagnostic_file {
                     serde_json::to_writer(&mut *file, sample)?;
                     file.write_all(b"\n")?;
@@ -1263,11 +1709,7 @@ pub(crate) fn run_profile(
     report.gpu_metrics_unavailable = collector.gpu_metrics_unavailable;
     report.independent_gpu_metrics = options.independent_gpu_metrics;
     report.gpu_query_delay_ms = options.gpu_query_delay_ms;
-    report.reduction_filter = if options.reduction_box {
-        "box4x4"
-    } else {
-        "bilinear"
-    };
+    report.reduction_filter = converter.reduction_filter().name();
     report.inflight_limit = options.inflight;
     report.encoder = encoder_kind.name();
     if encoder_kind != madscreen_encode::backend::BackendKind::Nvenc {

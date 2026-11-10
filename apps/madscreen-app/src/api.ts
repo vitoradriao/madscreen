@@ -113,11 +113,17 @@ export interface SourceList {
   windows: WindowSource[];
   monitors: MonitorSource[];
   encoder?: EncoderLimits | null;
+  /** `false`: sem NVENC, caminho de compatibilidade com readback; ausente em engine anterior. */
+  nvenc_available?: boolean | null;
+  /** PCI vendor da GPU padrão (0x8086 Intel, 0x1002 AMD); ausente em engine anterior. */
+  gpu_vendor_id?: number | null;
 }
 
 export interface Settings {
   quality_height: number;
   quality_fps: number;
+  /** O FPS salvo veio do seletor, não do padrão. */
+  quality_fps_chosen?: boolean;
   software_video_decode?: boolean;
 }
 
@@ -134,6 +140,7 @@ export const startShareCloudflare = (
   token?: string,
   audio?: AudioChoice,
   channelId?: string,
+  fpsChosen?: boolean,
 ) =>
   invoke<void>("start_share_cloudflare", {
     height,
@@ -144,11 +151,12 @@ export const startShareCloudflare = (
     token: token ?? null,
     audio: audio ?? null,
     channelId: channelId ?? null,
+    fpsChosen: fpsChosen ?? null,
   });
 export const listAudioApps = () => invoke<AudioApp[]>("list_audio_apps");
 /** Mantém destino/canal do compartilhamento atual; fonte omitida altera só qualidade. */
-export const changeShare = (height: number, fps: number, source?: PickedSource) =>
-  invoke<void>("change_share", { height, fps, source: source ? sourceChoice(source) : null, audio: source?.audio ?? null, selectionId:source?.selectionId??null });
+export const changeShare = (height: number, fps: number, source?: PickedSource, fpsChosen?: boolean) =>
+  invoke<void>("change_share", { height, fps, source: source ? sourceChoice(source) : null, audio: source?.audio ?? null, selectionId:source?.selectionId??null, fpsChosen: fpsChosen ?? null });
 export const listSources = () => invoke<SourceList>("list_sources");
 export const getForegroundSuggestion = () => invoke<{hwnd:number;instance_id:string}|null>("get_foreground_suggestion");
 export const listMonitors = () => invoke<SourceList>("list_monitors");

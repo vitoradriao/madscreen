@@ -25,9 +25,16 @@ export function createServers(client: MadClient, options: ServerOptions) {
   let busy = false;
   let operationFocusKey: string | undefined;
   let joinValue = "";
-  let membersExpanded = true;
+  // Em janela estreita a lista de membros sobrepõe o canal: fica fechada (abre pelo botão) e volta a coluna ao alargar.
+  const narrowMembers = typeof matchMedia === "function" ? matchMedia("(max-width: 960px)") : null;
+  let membersExpanded = !narrowMembers?.matches;
+  const onNarrowMembers = (event: MediaQueryListEvent): void => { if (disposed) return; membersExpanded = !event.matches; applyPage(); };
+  narrowMembers?.addEventListener("change", onNarrowMembers);
   let watchMembersExpanded = false;
-  let joinExpanded = false;
+  let joinPreview = "";
+  let joinTarget = "";
+  let joinVersion = 0;
+  let joinTimer = 0;
   const dialogs = new Set<HTMLDialogElement>();
   const closeMenus = (event: Event): void => {
     if (dialogs.size) return;
@@ -104,17 +111,26 @@ export function createServers(client: MadClient, options: ServerOptions) {
     try { localStorage.setItem(storageKey, JSON.stringify({ serverId, channelId })); } catch { /* Sem armazenamento. */ }
   }
 
-  function ask(title: string, initial?: string, detail?: string): Promise<string | null> {
+  function ask(title: string, initial?: string, detail?: string, label = "Nome"): Promise<string | null> {
     return new Promise(resolve => {
       const openerKey = document.activeElement instanceof HTMLElement ? document.activeElement.dataset.focuskey : undefined;
+      // O menu que abriu o diálogo some enquanto ele está aberto e volta depois, com o foco na mesma ação.
+      const openerMenu = document.activeElement instanceof HTMLElement ? document.activeElement.closest<HTMLDetailsElement>("details[data-action-menu]")?.dataset.actionMenu : undefined;
+      for (const menu of root.querySelectorAll<HTMLDetailsElement>("details[data-action-menu][open]")) menu.open = false;
       const dialog = el("dialog", { class: "server-dialog" });
       const input = initial === undefined ? null : el("input", { class: "input", value: initial, required: true, maxLength: 40 });
       const captionId = `server-dialog-${crypto.randomUUID()}`;
       const caption = el("h2", { id: captionId, textContent: title });
       dialog.setAttribute("aria-labelledby", captionId);
-      const description = detail ? el("p", { id: `${captionId}-detail`, class: "small", textContent: detail }) : null;
+      const description = detail ? el("p", { id: `${captionId}-detail`, class: "small muted", textContent: detail }) : null;
       if (description) dialog.setAttribute("aria-describedby", description.id);
-      if (input) input.setAttribute("aria-label", "Nome");
+      let inputField: HTMLElement | null = null;
+      if (input) {
+        input.id = `${captionId}-input`;
+        const caption = el("label", { textContent: label });
+        caption.htmlFor = input.id;
+        inputField = el("div", { class: "field" }, caption, input);
+      }
       const validation = el("p", { id: `${captionId}-validation`, class: "small", role: "status" });
       if (input) {
         input.setAttribute("aria-describedby", validation.id);
@@ -124,7 +140,7 @@ export function createServers(client: MadClient, options: ServerOptions) {
       const verb = title.replace(/\?$/, "");
       const save = el("button", { class: "btn primary", type: "submit", textContent: verb.startsWith("Renomear") ? "Salvar nome" : verb });
       let result: string | null = null;
-      const form = el("form", { class: "stack" }, caption, description, input, input ? validation : null, el("div", { class: "row" }, cancel, save));
+      const form = el("form", { class: "stack" }, caption, description, inputField, input ? validation : null, el("div", { class: "row" }, cancel, save));
       form.addEventListener("submit", event => {
         event.preventDefault();
         if (input && !input.value.trim()) {
@@ -141,6 +157,10 @@ export function createServers(client: MadClient, options: ServerOptions) {
       dialog.addEventListener("close", () => {
         dialogs.delete(dialog);
         dialog.remove();
+        if (!disposed && openerMenu) {
+          const menu = [...root.querySelectorAll<HTMLDetailsElement>("details[data-action-menu]")].find(node => node.dataset.actionMenu === openerMenu);
+          if (menu) menu.open = true;
+        }
         if (!disposed && openerKey) restoreFocus(openerKey);
         resolve(result);
       }, { once: true });
@@ -200,29 +220,34 @@ export function createServers(client: MadClient, options: ServerOptions) {
     const openerKey = operationFocusKey;
     const invite = await client.createInvite(server.id, channelId);
     if (disposed) return;
-    const input = el("input", { class: "input", value: invite.link, readOnly: true });
-    input.setAttribute("aria-label", "Link de convite do servidor");
+    const titleId = `invite-dialog-${crypto.randomUUID()}`;
+    const input = el("input", { class: "input", id: `${titleId}-link`, value: invite.link, readOnly: true });
+    const linkLabel = el("label", { textContent: "Link do convite" });
+    linkLabel.htmlFor = input.id;
+    // O Worker responde em segundos; aceita milissegundos por segurança.
+    const expiresMs = invite.expiresAt > 1e12 ? invite.expiresAt : invite.expiresAt * 1000;
+    const days = Math.max(1, Math.round((expiresMs - Date.now()) / 86_400_000));
+    const where = invite.destination ? `${invite.destination.serverName} · # ${invite.destination.channelName}` : server.name;
+    const terms = el("p", { class: "small muted", textContent: `Leva para ${where}. Vale por ${days} ${days === 1 ? "dia" : "dias"} e para até ${invite.maxUses} ${invite.maxUses === 1 ? "pessoa" : "pessoas"}. Quem ainda não tem o madscreen pode baixar o app ou assistir pelo navegador a partir do link.` });
     const copyStatus = el("p", { class: "small", role: "status" });
     const copy = button("Copiar convite", "Copiar link de convite", "copy-invite", () => {
       void copyText(invite.link).then(copied => {
         if (!dialog.open) return;
-        copyStatus.textContent = copied ? "Convite copiado." : "Não foi possível copiar. O link foi selecionado; use Ctrl+C para copiar.";
+        copy.textContent = copied ? "Link copiado" : "Copiar convite";
+        copyStatus.textContent = copied ? "Cole o link no WhatsApp, no Discord ou onde seus amigos estiverem." : "Não foi possível copiar. O link foi selecionado; use Ctrl+C para copiar.";
         if (!copied) { input.focus(); input.select(); }
       });
     });
     copy.disabled = false;
     const dialog = el("dialog", { class: "server-dialog" });
-    const titleId = `invite-dialog-${crypto.randomUUID()}`;
     dialog.setAttribute("aria-labelledby", titleId);
     const close = button("Fechar", "Fechar convite", "close-invite", () => dialog.close());
     close.disabled = false;
     copy.classList.add("primary");
     dialog.append(el("div", { class: "stack" },
       el("h2", { id: titleId, textContent: "Convidar amigos" }),
-      input, copyStatus, el("div", { class: "row" }, copy, close)));
-    const dismissTimer = setTimeout(() => { if (dialog.open) dialog.close(); }, 8_000);
+      terms, el("div", { class: "field" }, linkLabel, input), copyStatus, el("div", { class: "row" }, copy, close)));
     dialog.addEventListener("close", () => {
-      clearTimeout(dismissTimer);
       dialogs.delete(dialog);
       dialog.remove();
       if (!disposed && openerKey) restoreFocus(openerKey);
@@ -231,6 +256,65 @@ export function createServers(client: MadClient, options: ServerOptions) {
     document.body.append(dialog);
     dialog.showModal();
     copy.focus();
+  }
+
+  function createServer(): void {
+    void ask("Criar servidor", "", "Você será o dono e poderá convidar amigos, criar canais e renomear o servidor.", "Nome do servidor")
+      .then(name => { if (name) void run(() => client.createServer(name)); });
+  }
+
+  /** Campo de convite com prévia do destino, igual ao da entrada. Os campos visíveis compartilham o valor. */
+  function joinWidget(key: string): HTMLElement {
+    const input = el("input", { class: "input", placeholder: "Código ou link do convite", maxLength: 512, disabled: busy, value: joinValue, spellcheck: false, autocomplete: "off" });
+    input.setAttribute("aria-label", "Código ou link do convite");
+    input.dataset.focuskey = key;
+    const status = el("p", { class: "small muted join-status", role: "status", textContent: joinPreview });
+    const submit = el("button", { class: "btn primary sm join-submit", type: "submit", textContent: joinTarget ? `Entrar em ${joinTarget}` : "Entrar", disabled: busy || !joinValue.trim() });
+    const form = el("form", { class: "stack tight join-form" }, input, status, submit);
+    const paint = (): void => {
+      for (const node of root.querySelectorAll<HTMLElement>(".join-status")) node.textContent = joinPreview;
+      for (const node of root.querySelectorAll<HTMLButtonElement>(".join-submit")) {
+        node.textContent = joinTarget ? `Entrar em ${joinTarget}` : "Entrar";
+        node.disabled = busy || !joinValue.trim();
+      }
+      for (const node of root.querySelectorAll<HTMLInputElement>(".join-form input")) if (node !== document.activeElement) node.value = joinValue;
+    };
+    input.addEventListener("input", () => {
+      joinValue = input.value;
+      joinTarget = "";
+      const version = ++joinVersion;
+      clearTimeout(joinTimer);
+      joinPreview = joinValue.trim() ? "Conferindo o convite…" : "";
+      paint();
+      if (!joinValue.trim()) return;
+      joinTimer = window.setTimeout(() => {
+        client.previewInvite(joinValue).then(preview => {
+          if (version !== joinVersion || disposed) return;
+          joinTarget = preview.server?.name ?? "";
+          joinPreview = preview.server
+            ? `Convite de ${preview.inviter.displayName} para ${preview.server.name}${preview.channel ? ` · # ${preview.channel.name}` : ""}.`
+            : `Convite de ${preview.inviter.displayName}.`;
+          paint();
+        }).catch((error: unknown) => {
+          if (version !== joinVersion || disposed) return;
+          joinPreview = `${error instanceof Error ? error.message : "Convite inválido."} Confira o convite ou peça um novo link a quem convidou.`;
+          paint();
+        });
+      }, 400);
+    });
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      const value = input.value;
+      joinValue = value;
+      if (!value.trim()) { input.focus(); return; }
+      void run(async () => {
+        const next = await client.redeemInvite(inviteCodeFrom(value, client.base));
+        joinValue = ""; joinPreview = ""; joinTarget = ""; joinVersion++;
+        clearInvite();
+        return next;
+      });
+    });
+    return form;
   }
 
   function render(): void {
@@ -268,22 +352,9 @@ export function createServers(client: MadClient, options: ServerOptions) {
     addServer.menu.classList.add("server-add-menu");
     const addSummary = addServer.menu.querySelector("summary")!;
     addSummary.setAttribute("aria-label", "Adicionar servidor");
-    addServer.items.append(menuButton("Criar servidor", "Criar servidor", "server-create", () => {
-      void ask("Criar servidor", "").then(name => { if (name) void run(() => client.createServer(name)); });
-    }, "plus"));
+    addServer.items.append(menuButton("Criar servidor", "Criar servidor", "server-create", createServer, "plus"));
     rail.append(addServer.menu);
     serverRail.replaceChildren(el("div", { class: "directory-brand", ariaLabel: "madscreen" }, svg(icon("logo"))), rail);
-    const joinInput = el("input", { class: "input", placeholder: "Código ou link do convite", maxLength: 512, disabled: busy, value: joinValue });
-    joinInput.addEventListener("input", () => { joinValue = joinInput.value; });
-    joinInput.setAttribute("aria-label", "Entrar em um servidor por convite");
-    joinInput.dataset.focuskey = "join-code";
-    const join = el("button", { class: "btn primary sm", type: "submit", textContent: "Entrar", disabled: busy });
-    const joinForm = el("form", { class: "stack tight" }, joinInput, join);
-    joinForm.addEventListener("submit", event => {
-      event.preventDefault();
-      const value = joinInput.value;
-      void run(async () => { const next = await client.redeemInvite(inviteCodeFrom(value, client.base)); joinValue = ""; clearInvite(); return next; });
-    });
     const channelList = el("nav", { class: "stack tight" });
     channelList.setAttribute("aria-label", "Canais do servidor");
     for (const item of server?.channels ?? []) {
@@ -296,10 +367,8 @@ export function createServers(client: MadClient, options: ServerOptions) {
       pick.setAttribute("aria-current", String(item.id === channelId));
       channelList.append(pick);
     }
-    const joinSection = el("details", { class: "server-join", open: !servers.length || joinExpanded },
-      el("summary", { class: "menu-item" }, svg(icon("link", "sm")), "Entrar por convite", svg(icon("chevronDown", "sm"))), joinForm);
-    joinSection.addEventListener("toggle", () => { if (joinSection.isConnected) joinExpanded = joinSection.open; });
-    addServer.items.append(joinSection);
+    addServer.items.append(el("hr", { class: "menu-sep" }), el("div", { class: "server-join stack tight" },
+      el("span", { class: "menu-label" }, svg(icon("link", "sm")), "Entrar com convite"), joinWidget("join-code")));
     const sideActions = el("div", { class: "channel-side-actions stack tight" });
     const user = client.session?.user;
     const profile = el("div", { class: "channel-profile" }, user ? avatar(user, true) : null,
@@ -318,7 +387,12 @@ export function createServers(client: MadClient, options: ServerOptions) {
         el("p", { class: "muted" }, "Carregando servidores…"), el("div", { class: "server-streams" }, el("div", { class: "skel skel-tile" }), el("div", { class: "skel skel-tile" })));
       content.append(skeleton);
     } else if (!server || !channel) {
-      content.append(el("div", { class: "empty-main" }, svg(icon("users")), el("h2", {}, "Nenhum servidor"), el("p", { class: "small", textContent: "Use o botão + para criar um servidor ou entrar por convite." })));
+      const create = button("Criar um servidor", "Criar um servidor", "empty-create", createServer);
+      create.classList.add("ghost");
+      content.append(el("div", { class: "empty-main empty-start" }, svg(icon("users")),
+        el("h2", {}, "Você ainda não está em nenhum servidor"),
+        el("p", { class: "small", textContent: "Cole o convite que um amigo mandou para entrar no servidor dele, ou crie o seu e chame a turma." }),
+        joinWidget("empty-join"), create));
     } else {
       const target: InviteDestination = { serverId: server.id, serverName: server.name, channelId: channel.id, channelName: channel.name };
       const actions = el("div", { class: "row channel-actions" });
@@ -337,10 +411,10 @@ export function createServers(client: MadClient, options: ServerOptions) {
         const channelMenu = actionMenu("Opções do canal", `channel-${channel.id}`);
         sideActions.append(channelMenu.menu);
         channelMenu.items.append(menuButton("Novo canal", "Criar canal", "channel-create", () => {
-          void ask("Criar canal", "").then(name => { if (name) void run(() => client.createChannel(server.id, name)); });
+          void ask("Criar canal", "", undefined, "Nome do canal").then(name => { if (name) void run(() => client.createChannel(server.id, name)); });
         }, "plus"));
         channelMenu.items.append(menuButton("Renomear", "Renomear canal", "channel-rename", () => {
-          void ask("Renomear canal", channel.name).then(name => { if (name) void run(() => client.renameChannel(server.id, channel.id, name)); });
+          void ask("Renomear canal", channel.name, undefined, "Nome do canal").then(name => { if (name) void run(() => client.renameChannel(server.id, channel.id, name)); });
         }));
         if (server.channels.length > 1) {
           const remove = menuButton("Apagar canal", "Apagar canal e encerrar suas transmissões", "channel-remove", () => {
@@ -366,7 +440,25 @@ export function createServers(client: MadClient, options: ServerOptions) {
         tile.dataset.theme = videoTheme();
         streams.append(tile);
       }
-      if (!channel.live.length) streams.append(el("div", { class: "empty-main" }, svg(icon("monitor")), el("h2", {}, `Nenhuma transmissão em #${channel.name}`), el("p", { class: "small", textContent: "Selecione uma janela ou tela para compartilhar." }), options.onShare ? makeShare("empty-share") : null));
+      if (!channel.live.length && server.members.length <= 1 && server.role !== "member") {
+        // Conta nova: o servidor só tem você. Sem amigos não há quem assista, então convidar vem antes.
+        const inviteNow = button("Convidar amigos", "Criar convite deste canal", "empty-invite", () => { void run(() => invite(server)); });
+        inviteNow.classList.add("primary");
+        inviteNow.prepend(svg(icon("userPlus", "sm")));
+        const shareAlone = options.onShare ? makeShare("empty-share") : null;
+        shareAlone?.classList.remove("primary");
+        const rename = server.role === "owner" ? button("Trocar o nome", "Renomear servidor", "empty-rename", () => {
+          void ask("Renomear servidor", server.name, undefined, "Nome do servidor").then(name => { if (name) void run(() => client.renameServer(server.id, name)); });
+        }) : null;
+        rename?.classList.add("ghost");
+        streams.append(el("div", { class: "empty-main empty-start" }, svg(icon("userPlus")),
+          el("h2", {}, "Chame seus amigos para cá"),
+          el("p", { class: "small", textContent: `${server.name} é o seu servidor. Mande o convite para quem vai assistir às suas lives e transmitir junto com você.` }),
+          el("div", { class: "row empty-actions" }, inviteNow, shareAlone, rename)));
+      } else if (!channel.live.length) {
+        streams.append(el("div", { class: "empty-main" }, svg(icon("monitor")), el("h2", {}, `Ninguém ao vivo em # ${channel.name}`),
+          el("p", { class: "small", textContent: "Quando alguém compartilhar a tela neste canal, a live aparece aqui." }), options.onShare ? makeShare("empty-share") : null));
+      }
       const members = el("aside", { class: "server-members", hidden: !membersExpanded, ariaLabel: "Membros do servidor" });
       const toggleMembers = () => {
         if (activePage === "watch") watchMembersExpanded = !watchMembersExpanded;
@@ -429,7 +521,7 @@ export function createServers(client: MadClient, options: ServerOptions) {
         void ask("Sair do servidor?", undefined, server.role === "owner" ? "Outro membro assumirá como dono. Se não houver outros membros, o servidor será apagado." : "Você precisará de um novo convite para voltar.").then(ok => { if (ok) void run(() => client.leaveServer(server.id)); });
       }, "logout");
       if (server.role === "owner") {
-        serverMenu.items.append(menuButton("Renomear servidor", "Renomear servidor", "server-rename", () => { void ask("Renomear servidor", server.name).then(name => { if (name) void run(() => client.renameServer(server.id, name)); }); }));
+        serverMenu.items.append(menuButton("Renomear servidor", "Renomear servidor", "server-rename", () => { void ask("Renomear servidor", server.name, undefined, "Nome do servidor").then(name => { if (name) void run(() => client.renameServer(server.id, name)); }); }));
       }
       if (server.role === "owner") serverMenu.items.append(el("hr", { class: "menu-sep" }));
       serverMenu.items.append(leaveServer);
@@ -472,7 +564,10 @@ export function createServers(client: MadClient, options: ServerOptions) {
     const main = content.querySelector(".channel-main");
     const sectionTitle = main?.querySelector(".channel-section-title");
     if (sectionTitle && channel) {
-      sectionTitle.replaceWith(el("div", { class: "view-head channel-heading" }, el("h1", {}, "Ao vivo agora"), el("p", { class: "muted" }, `${channel.live.length} transmissões em # ${channel.name}`)));
+      const count = channel.live.length;
+      sectionTitle.replaceWith(el("div", { class: "view-head channel-heading" },
+        el("h1", {}, count ? "Ao vivo agora" : `# ${channel.name}`),
+        el("p", { class: "muted" }, count ? `${count} ${count === 1 ? "transmissão" : "transmissões"} em # ${channel.name}` : "Ninguém ao vivo agora")));
       main?.querySelector(":scope > .eyebrow")?.remove();
     }
     const accountButton = button("", "Abrir configurações da conta", "account-settings", () => options.onSettings?.());
@@ -509,9 +604,12 @@ export function createServers(client: MadClient, options: ServerOptions) {
     pageHost.classList.toggle("watching", activePage === "watch");
     root.dataset.page = activePage;
     const workspace = root.querySelector<HTMLElement>(".server-workspace")!;
-    const showMembers = activePage === "watch" ? watchMembersExpanded : membersExpanded && (activePage === "servers" || activePage === "share");
-    workspace.classList.toggle("members-collapsed", !showMembers);
     const members = workspace.querySelector<HTMLElement>(":scope > .server-members");
+    // Sem servidor não há membros: a coluna não fica reservada vazia.
+    const showMembers = !!members && (activePage === "watch" ? watchMembersExpanded : membersExpanded && (activePage === "servers" || activePage === "share"));
+    workspace.classList.toggle("members-collapsed", !showMembers);
+    const idle = !members && !sharing && activePage === "servers";
+    for (const node of navigation.querySelectorAll<HTMLElement>(".back-channel, .directory-shortcuts")) node.hidden = idle;
     if (members) members.hidden = !showMembers;
     root.querySelector('[data-focuskey="toggle-members"]')?.setAttribute("aria-expanded", String(showMembers));
     root.querySelectorAll<HTMLElement>('[data-focuskey="share-here"]').forEach(node => {
@@ -540,6 +638,6 @@ export function createServers(client: MadClient, options: ServerOptions) {
       const retry = button("Tentar novamente", "Carregar servidores novamente", "retry-directory", () => { void run(() => client.servers()); });
       alerts.replaceChildren(banner("error", error instanceof Error ? error.message : "Não foi possível entrar no servidor."), retry);
     },
-    dispose() { disposed = true; menuObserver.disconnect(); cancelAnimationFrame(menuFrame); window.removeEventListener("resize", queueMenuLayout); window.removeEventListener("scroll", queueMenuLayout, true); root.removeEventListener("toggle", onMenuToggle, true); document.removeEventListener("pointerdown", closeMenus); root.removeEventListener("keydown", closeMenus); clearInterval(ageTimer); liveTimes.clear(); watchButtons.clear(); for (const dialog of dialogs) dialog.close(); dialogs.clear(); },
+    dispose() { disposed = true; narrowMembers?.removeEventListener("change", onNarrowMembers); clearTimeout(joinTimer); menuObserver.disconnect(); cancelAnimationFrame(menuFrame); window.removeEventListener("resize", queueMenuLayout); window.removeEventListener("scroll", queueMenuLayout, true); root.removeEventListener("toggle", onMenuToggle, true); document.removeEventListener("pointerdown", closeMenus); root.removeEventListener("keydown", closeMenus); clearInterval(ageTimer); liveTimes.clear(); watchButtons.clear(); for (const dialog of dialogs) dialog.close(); dialogs.clear(); },
   };
 }

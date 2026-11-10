@@ -55,3 +55,9 @@
   Pop $R0
   ClearErrors
 !macroend
+
+; Atualizacao nao recria atalhos e o Windows guarda o icone antigo em cache. SHCNE_ASSOCCHANGED
+; (0x08000000, SHCNF_IDLIST) faz o Shell redesenhar atalhos, menu Iniciar e barra com o icone do exe novo.
+!macro NSIS_HOOK_POSTINSTALL
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+!macroend

@@ -9,6 +9,8 @@ pub struct Settings {
     /// Último perfil escolhido na tela principal.
     pub quality_height: u32,
     pub quality_fps: u32,
+    /// O usuário escolheu o FPS no seletor; sem isso, PC sem NVENC começa em 30 FPS.
+    pub quality_fps_chosen: bool,
     /// Contorno para freezes no decoder acelerado do WebView2. Requer reinício.
     pub software_video_decode: bool,
     pub tray_notice_seen: bool,
@@ -19,6 +21,7 @@ impl Default for Settings {
         Self {
             quality_height: 1080,
             quality_fps: 60,
+            quality_fps_chosen: false,
             software_video_decode: false,
             tray_notice_seen: false,
         }
@@ -56,6 +59,8 @@ mod tests {
     fn existing_preferences_keep_hardware_decode_until_opt_in() -> Result<(), serde_json::Error> {
         let old: Settings = serde_json::from_str(r#"{"quality_height":720,"quality_fps":30}"#)?;
         assert!(!old.software_video_decode);
+        // O 60 FPS salvo por versões anteriores era só o último usado, não escolha explícita.
+        assert!(!old.quality_fps_chosen);
         assert_eq!((old.quality_height, old.quality_fps), (720, 30));
         let enabled = Settings {
             software_video_decode: true,

@@ -25,6 +25,9 @@ pub struct CfPublishConfig {
     pub start_bitrate_bps: Option<u64>,
     /// Publica também uma faixa de áudio Opus 48 kHz estéreo na mesma sessão.
     pub audio: bool,
+    /// Laboratório: oferece só AV1 e entrega AUs AV1 do encoder. Sem fallback H.264;
+    /// nunca ligado pelo app.
+    pub lab_av1: bool,
 }
 
 impl Default for CfPublishConfig {
@@ -45,6 +48,7 @@ impl Default for CfPublishConfig {
             keepalive: false,
             start_bitrate_bps: None,
             audio: false,
+            lab_av1: false,
         }
     }
 }

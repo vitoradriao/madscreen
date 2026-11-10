@@ -1,6 +1,6 @@
 import {
   changeShare, errorText, getPublisherDiagnostics, getSettings, getState, listMonitors, listSources, outputOptions, setSharePrivacy, startShareCloudflare, stopShare,
-  type EncoderLimits, type OutputOption, type Phase, type PickedSource, type ShareState,
+  type EncoderLimits, type OutputOption, type Phase, type PickedSource, type Settings, type ShareState,
 } from "../api";
 import { connectStreamEvents, type StreamEvent, type InviteDestination, type Snapshot } from "@shared/client";
 import { createWatchPanel, type WatchPanel } from "@shared/ui";
@@ -9,7 +9,7 @@ import { client, WORKER_URL } from "../session";
 import { pickSource } from "./picker";
 import { toggleFullscreen } from "./fullscreen";
 import { createJoinNotice, createJoinSound } from "../join-sound";
-import { historyKey,parseHistory,confirmedPreferenceFor,rememberApp,validateWindow } from "../share-history";
+import { defaultFps,historyKey,parseHistory,confirmedPreferenceFor,rememberApp,validateWindow } from "../share-history";
 
 const PHASE_LABEL: Record<Phase, string> = {
   idle: "Parado",
@@ -20,6 +20,8 @@ const PHASE_LABEL: Record<Phase, string> = {
 };
 
 const HEIGHT_CHOICES = [720, 1080, 1440, 2160, 0];
+/** Megabits por segundo com vírgula decimal, como o restante do app em pt-BR. */
+const mbps = (bps: number): string => (bps / 1_000_000).toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
 function fallbackOptions(): OutputOption[] {
   return HEIGHT_CHOICES.map((choice) => ({
@@ -53,8 +55,11 @@ export function createShareView(): ShareView {
   let pendingSource: AbortController | null = null;
   let heightEdited = false;
   let fpsEdited = false;
+  let savedSettings: Settings | null = null;
+  let gpuInfo: { nvenc_available?: boolean | null; gpu_vendor_id?: number | null } | null = null;
   let reference: { name: string; width: number; height: number } | null = null;
   let selectedSource: PickedSource | null = null;
+  let retryStart = false;
   let confirmedSound: string | null = null;
   let activeDestination: InviteDestination | null = null;
   let latestState: ShareState | null = null;
@@ -279,14 +284,15 @@ export function createShareView(): ShareView {
   const soundSummary = el("p", { class: "small muted" });
   const qualitySummary = el("p", { class: "small" });
   const destination = el("p", { class: "small muted", hidden: true });
-  const qualityDetails = el("details", { class: "share-quality", hidden: true, open: true },
-    el("summary", { textContent: "Qualidade e FPS" }),
+  const qualityDetails = el("details", { class: "share-quality", hidden: true },
+    el("summary", { textContent: "Alterar qualidade" }),
     el("div", { class: "stack mt" },
       el("div", { class: "res-field" }, el("span", { class: "label" }, "Resolução"), resolution, sourceSummary, resolutionAlerts),
       el("div", { class: "stack tight" }, el("span", { class: "label" }, "Taxa de quadros"), rate.root),
+      el("p", { class: "small muted" }, "Nativa mantém o tamanho original. Resoluções menores reduzem os detalhes e os dados enviados. FPS é a quantidade de quadros por segundo."),
     ),
   );
-  const hint = el("p", { class: "muted" }, "Você escolhe a janela ou tela que quer compartilhar.");
+  const hint = el("p", { class: "muted small" }, "Nada é transmitido antes da confirmação.");
   const alerts = el("div", { class: "alerts" });
   const applyQuality = el("button", { class: "btn primary block", type: "button", textContent: "Aplicar qualidade" });
   const changeSource = el("button", { class: "btn", type: "button", textContent: "Trocar janela ou tela" });
@@ -349,9 +355,10 @@ export function createShareView(): ShareView {
       : selectedSource?.name ?? (selectedSource?.kind === "picker" ? "Seletor do Windows" : "Nenhuma fonte selecionada");
     const size = active ? confirmedReference : reference;
     if (size) sourceName.textContent += ` · ${size.width}×${size.height}`;
-    qualityDetails.hidden = false;
-    qualitySummary.hidden = !active && !selectedSource;
-    qualitySummary.textContent = active && state && state.width > 0
+    qualityDetails.hidden = !active && !selectedSource;
+    qualitySummary.textContent = !active && !selectedSource
+      ? "Escolha uma janela ou tela para conferir a qualidade."
+      : active && state && state.width > 0
       ? `Em transmissão: ${state.width}×${state.height} · ${confirmedFps} FPS${height !== confirmedHeight || fps !== confirmedFps ? ` · Escolha pendente: ${current ? optionTitle(current) : height} · ${fps} FPS` : ""}`
       : `Qualidade: ${current ? optionTitle(current) : height} · ${fps} FPS`;
     soundSummary.textContent = active && state?.phase === "live"
@@ -364,11 +371,15 @@ export function createShareView(): ShareView {
     chooseSource.classList.toggle("primary", !selectedSource);
     chooseSource.textContent = selectedSource ? "Trocar fonte ou som" : "Escolher janela ou tela";
     chooseSource.disabled = preparing || !channel;
-    button.textContent = active ? phase === "starting" && !changing ? "Cancelar" : "Parar" : selectedSource ? "Compartilhar" : "Compartilhar tela";
+    button.textContent = active ? phase === "starting" && !changing ? "Cancelar" : "Parar"
+      : selectedSource ? retryStart ? "Tentar novamente" : "Compartilhar" : "Compartilhar tela";
   }
   function syncChangeControls() {
-    changeControls.hidden = phase !== "live" && !changing;
-    applyQuality.disabled = !canEditQuality() || (height === confirmedHeight && fps === confirmedFps);
+    const qualityChanged = height !== confirmedHeight || fps !== confirmedFps;
+    const hideApply = !changing && (phase !== "live" || !qualityChanged);
+    if (hideApply && changeControls.contains(document.activeElement)) qualityDetails.querySelector("summary")?.focus();
+    changeControls.hidden = hideApply;
+    applyQuality.disabled = !canEditQuality() || !qualityChanged;
     changeSource.disabled = !canEditQuality();
     applyQuality.textContent = changing ? "Aplicando…" : "Aplicar qualidade";
   }
@@ -387,7 +398,7 @@ export function createShareView(): ShareView {
     alerts.replaceChildren();
     syncControls();
     try {
-      const source = pickNewSource ? await pickSource(operation.signal) : undefined;
+      const source = pickNewSource ? await pickSource(operation.signal, { liveChange: true }) : undefined;
       if (disposed || operation.signal.aborted || (pickNewSource && !source)) return;
       if (source?.width && source.height) {
         reference = { name: source.name ?? "Fonte selecionada", width: source.width, height: source.height };
@@ -398,7 +409,7 @@ export function createShareView(): ShareView {
       if(source)await revalidate(source,operation.signal);
       if(disposed||operation.signal.aborted||phase!=="live")return;
       profileChangePending=true;
-      await changeShare(height, fps, source ?? undefined);
+      await changeShare(height, fps, source ?? undefined, fpsEdited);
       if (source && !disposed && !operation.signal.aborted) confirmedSound = soundChoice(source);
       if(!disposed&&!operation.signal.aborted&&(source?.instanceId||selectedSource?.instanceId)){
         // A alteração pode emitir eventos antes de resolver. Ler o supervisor evita
@@ -426,9 +437,9 @@ export function createShareView(): ShareView {
   changeSource.addEventListener("click", () => { void applyChange(true); });
     previewButton.setAttribute("aria-expanded", "false");
   const previewHolder = el("div", { class: "share-preview", hidden: true });
-  const stageEmpty = el("div", { class: "share-stage-empty" },
-    el("strong", {}, "Prévia sem som"),
-    el("span", { class: "muted small" }, "A prévia fica desligada para poupar o jogo. Mostre quando quiser conferir a imagem."));
+  const previewStage = el("div", { class: "share-stage", hidden: true }, previewHolder);
+  const previewNote = el("p", { class: "share-preview-note muted small", hidden: true },
+    "A prévia sem som fica desligada para poupar o jogo. Abra quando quiser conferir a imagem.");
   let preview: WatchPanel | null = null;
   let previewOwner = "";
   let previewEnabled = false;
@@ -439,6 +450,8 @@ export function createShareView(): ShareView {
     previewOwner = "";
     preview?.stop();
     previewHolder.hidden = true;
+    previewStage.hidden = true;
+    previewNote.hidden = !publishingConnected || (!!latestState?.privacy_video && latestState.privacy_video !== "active");
     previewButton.textContent = "Mostrar prévia (sem som)";
     previewButton.setAttribute("aria-expanded", "false");
   }
@@ -455,10 +468,15 @@ export function createShareView(): ShareView {
       closePreview();
       return;
     }
-    if (!previewEnabled || previewOwner === user.username) return;
+    if (!previewEnabled || previewOwner === user.username) {
+      previewNote.hidden = !previewHolder.hidden;
+      return;
+    }
     preview ??= createWatchPanel(client, { preview: true, toggleFullscreen, onLeave: closePreview });
     previewHolder.replaceChildren(preview.root);
     previewHolder.hidden = false;
+    previewStage.hidden = false;
+    previewNote.hidden = true;
     previewButton.textContent = "Ocultar prévia";
     previewButton.setAttribute("aria-expanded", "true");
     previewOwner = user.username;
@@ -514,6 +532,7 @@ export function createShareView(): ShareView {
         clearRecent:()=>{try{localStorage.removeItem(appHistoryKey);}catch{/* Sem armazenamento. */}} });
       if (!source || disposed || operation.signal.aborted) return;
       selectedSource = source;
+      retryStart = false;
       reference = source.width && source.height
         ? { name: source.name ?? "Fonte selecionada", width: source.width, height: source.height } : null;
       await recalculateOptions();
@@ -524,10 +543,13 @@ export function createShareView(): ShareView {
         activeDestination = selectedChannel;
         await revalidate(source,operation.signal);
         if(disposed||operation.signal.aborted||channel?.channelId!==selectedChannel.channelId||!client.session||client.session.token!==consentToken)return;
-        await startShareCloudflare(height, fps, source, WORKER_URL, client.token, source.audio, selectedChannel.channelId);
+        await startShareCloudflare(height, fps, source, WORKER_URL, client.token, source.audio, selectedChannel.channelId, fpsEdited);
       }
     } catch (error) {
-      if (!disposed && !operation.signal.aborted) alerts.replaceChildren(banner("error", errorText(error)));
+      if (!disposed && !operation.signal.aborted) {
+        retryStart = quickStart && !!selectedSource;
+        alerts.replaceChildren(banner("error", errorText(error)));
+      }
     } finally {
       if (pendingSource === operation) { pendingSource = null; preparing = false; }
       if (!disposed) syncControls();
@@ -539,6 +561,7 @@ export function createShareView(): ShareView {
     if (phase === "idle" && !changing && !selectedSource) { await prepareSource(); return; }
     if (phase === "idle" && !changing && preparing) return;
     alerts.replaceChildren();
+    retryStart = false;
     const operation = new AbortController();
     try {
       if (phase !== "idle" || changing) {
@@ -557,10 +580,13 @@ export function createShareView(): ShareView {
         if(disposed||operation.signal.aborted||channel?.channelId!==target.channelId||!client.session||client.session.token!==consentToken)return;
         confirmedSound = soundChoice(source);
         activeDestination = target;
-        await startShareCloudflare(height, fps, source, WORKER_URL, client.token, source.audio, target.channelId);
+        await startShareCloudflare(height, fps, source, WORKER_URL, client.token, source.audio, target.channelId, fpsEdited);
       }
     } catch (error) {
-      if (!disposed && !operation.signal.aborted) alerts.replaceChildren(banner("error", errorText(error)));
+      if (!disposed && !operation.signal.aborted) {
+        retryStart = phase === "idle" && !!selectedSource;
+        alerts.replaceChildren(banner("error", errorText(error)));
+      }
     } finally {
       if (pendingSource === operation) { pendingSource = null; preparing = false; }
       if (!disposed) syncControls();
@@ -570,47 +596,57 @@ export function createShareView(): ShareView {
   const step = (number: string, title: string, ...children: HTMLElement[]) => el("div", { class: `step share-step share-step-${number}` },
     el("span", { class: "num", ariaHidden: "true" }, number), el("div", { class: "body" }, el("h2", {}, title), ...children));
   const channelStep = step("1", "Canal", channelSelect, destination);
-  const sourceStep = step("2", "Fonte e som", sourceName, soundSummary, chooseSource);
-  const qualityStep = step("3", "Qualidade e FPS", qualitySummary, qualityDetails);
+  const sourceStep = step("2", "Imagem e som",
+    el("div", { class: "share-source-row" }, el("div", { class: "stack tight grow" }, sourceName, soundSummary), chooseSource),
+    privacyControls);
+  const qualityStep = step("3", "Qualidade", qualitySummary, qualityDetails);
   const root = el(
     "section",
     { class: "view share-view" },
-    el("header", { class: "view-head" }, el("div", { class: "grow" }, el("h1", {}, "Minha transmissão"), el("p", { class: "muted" }, "Escolha o canal, a fonte e a qualidade.")), badge, copyPublisher, button),
+    el("header", { class: "view-head" }, el("div", { class: "grow" }, el("h1", {}, "Minha transmissão"), el("p", { class: "muted" }, "Escolha o que seus amigos vão ver e ouvir.")), badge),
     el("div", { class: "share-layout" },
+      el("section", { class: "share-side card steps", ariaLabel: "Configuração da transmissão" },
+        channelStep, sourceStep, qualityStep, actions),
       el("div", { class: "share-main" },
-        el("div", { class: "share-stage" }, previewHolder, stageEmpty),
-        privacyControls,
+        previewStage,
+        previewNote,
         viewers,
-        alerts,
-        el("details", { class: "card stack share-diagnostics" },
+        el("div", { class: "share-support" }, el("details", { class: "card stack share-diagnostics" },
           el("summary", { textContent: "Detalhes e diagnóstico" }),
           el("div", { class: "stats mt" }, el("div", { class: "stat" }, fpsValue, fpsSub), el("div", { class: "stat" }, bitrateValue, bitrateSub)),
           encoderStatus, details,
           el("p", { class: "small muted" }, "Travou ou apresentou ruído? Copie logo após o problema, junto com o diagnóstico de quem assiste. Informe a versão dos dois apps e a fonte escolhida."),
-        ),
+        ), copyPublisher),
       ),
-      el("section", { class: "share-side card steps", ariaLabel: "Configuração da transmissão" },
-        channelStep, sourceStep, qualityStep, actions),
     ),
   );
 
-  actions.append(hint, changeControls);
+  actions.append(alerts, hint, changeControls, button);
   renderResolution();
   const initialization = Promise.all([
     getSettings().then((settings) => {
       if (disposed) return;
       if (!heightEdited) height = HEIGHT_CHOICES.includes(settings.quality_height) ? settings.quality_height : 1080;
-      if (!fpsEdited) fps = settings.quality_fps === 30 ? 30 : 60;
-      rate.set(fps);
+      savedSettings = settings;
+      applyDefaultFps();
       return recalculateOptions();
     }).catch(() => undefined),
     listMonitors().then((sources) => {
       if (disposed) return;
       limits = sources.encoder ?? null;
+      gpuInfo = { nvenc_available: sources.nvenc_available, gpu_vendor_id: sources.gpu_vendor_id };
+      applyDefaultFps();
       // Sem uma escolha no seletor, nenhuma tela ou janela está selecionada.
       return recalculateOptions();
     }).catch(() => undefined),
   ]).then(async () => { await pendingOptions; });
+
+  /** As duas consultas chegam em qualquer ordem; só o seletor do usuário encerra o padrão. */
+  function applyDefaultFps() {
+    if (fpsEdited || !savedSettings) return;
+    fps = defaultFps(savedSettings, gpuInfo);
+    rate.set(fps);
+  }
 
   function syncControls() {
     syncPrivacy();
@@ -625,7 +661,7 @@ export function createShareView(): ShareView {
     syncSummary();
     channelStep.classList.toggle("done", !!channel);
     sourceStep.classList.toggle("done", !!selectedSource || phase === "live");
-    qualityStep.classList.toggle("done", phase === "live");
+    qualityStep.classList.toggle("done", !!selectedSource || phase === "live");
     qualityStep.classList.toggle("locked", !selectedSource && phase === "idle");
   }
 
@@ -637,7 +673,11 @@ export function createShareView(): ShareView {
     syncPrivacy();
     changing = state.changing === true;
     if ((phase === "stopping" || phase === "idle") && !changing && previousPhase !== "idle") pendingSource?.abort();
-    if (phase === "idle" && !changing && previousPhase !== "idle") { selectedSource = null; confirmedSound = null; confirmedReference = null; activeDestination = null; clearSourceReference(); lastSession = undefined; }
+    if (phase === "idle" && !changing && previousPhase !== "idle") {
+      retryStart = state.message_is_error === true && !!selectedSource;
+      if (!retryStart) { selectedSource = null; clearSourceReference(); }
+      confirmedSound = null; confirmedReference = null; activeDestination = null; lastSession = undefined;
+    }
     if (phase === "live" && !changing && (previousPhase !== "live" || lastSession !== state.session_id)) {
       lastSession = state.session_id;
       const requested = state.quality_height ?? (HEIGHT_CHOICES.includes(state.height) ? state.height : 0);
@@ -663,7 +703,7 @@ export function createShareView(): ShareView {
     hint.hidden = busy && phase !== "live" && !changing;
     hint.textContent = phase === "live" || changing
       ? "Alterar a qualidade ou a fonte pode causar uma breve reconexão para quem assiste."
-      : "Você escolhe a janela ou tela que quer compartilhar.";
+      : "Nada é transmitido antes da confirmação.";
     trackViewers(connected);
 
     const live = phase === "live";
@@ -673,9 +713,9 @@ export function createShareView(): ShareView {
         : phase === "stopping" && state.encoder ? `Codificador: ${state.encoder} · encerrando…`
           : "Codificador: seleção automática";
     fpsValue.textContent = live ? state.fps.toFixed(0) : "—";
-    bitrateValue.textContent = live ? (state.bitrate_bps / 1_000_000).toFixed(1) : "—";
+    bitrateValue.textContent = live ? mbps(state.bitrate_bps) : "—";
     fpsSub.textContent = live ? `FPS do encoder (alvo ${state.fps_target.toFixed(0)})` : "FPS";
-    bitrateSub.textContent = live ? `Mbps do encoder (alvo ${(state.bitrate_target_bps / 1_000_000).toFixed(1)})` : "Mbps";
+    bitrateSub.textContent = live ? `Mbps do encoder (alvo ${mbps(state.bitrate_target_bps)})` : "Mbps";
     const output = `${state.width}x${state.height}`;
     const dimensions = state.source_width > 0 && state.source_height > 0
       && (state.source_width !== state.width || state.source_height !== state.height)

@@ -17,7 +17,11 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use windows::Win32::Graphics::Dxgi::DXGI_ERROR_WAS_STILL_DRAWING;
 use windows::{Win32::Graphics::Direct3D11::*, core::s};
+#[path = "readback_ring.rs"]
+mod readback_ring;
+use readback_ring::{MapMode, ReadbackRing, tail_due};
 
 // Prefixos públicos de libavutil/frame.h e libavcodec/packet.h (n8.0).
 // Nunca alocar essas structs em Rust: campos posteriores pertencem à biblioteca.
@@ -153,18 +157,11 @@ fn unavailable(message: impl Into<String>) -> EncodeError {
 }
 
 fn configure_amf(api: &Api, context: *mut Context) -> Result<()> {
-    let set = |key: &str, value: &str| api.set(context, key, value);
-    set("usage", "ultralowlatency")?;
-    set("quality", "speed")?;
-    set("rc", "cbr")?;
-    set("preanalysis", "0")?;
-    // FFmpeg 8.1.2 amfenc.c mantém uma entrada de atraso sem LOW_DELAY,
-    // mesmo sem B-frames. Um probe de um quadro nunca sairia de EAGAIN.
-    set("flags", "+low_delay")?;
-    // AV_PICTURE_TYPE_I sozinho pede I, não IDR nem reinserção de SPS/PPS.
-    // Necessário tanto no probe quanto nos pedidos de recuperação do viewer.
-    set("forced_idr", "1")?;
-    set("async_depth", "1")?;
+    for (key, value) in
+        crate::backend_options::backend_options(BackendKind::Amf, &EncoderConfig::default())
+    {
+        api.set(context, key, &value)?;
+    }
     Ok(())
 }
 
@@ -188,20 +185,39 @@ impl Drop for Session {
         }
     }
 }
+fn warn_qsv_hint_once(error: &EncodeError) {
+    static QSV_HINT_WARNING: std::sync::Once = std::sync::Once::new();
+    QSV_HINT_WARNING.call_once(|| {
+        tracing::warn!(%error, "QSV rejeitou dica scenario; usando tentativa compatível sem a dica");
+    });
+}
 impl Session {
     fn new(api: Arc<Api>, config: &EncoderConfig, kind: BackendKind, slots: usize) -> Result<Self> {
+        crate::backend_options::open_backend(
+            kind,
+            |use_hint| Self::new_attempt(api.clone(), config, kind, slots, use_hint),
+            warn_qsv_hint_once,
+        )
+    }
+    fn new_attempt(
+        api: Arc<Api>,
+        config: &EncoderConfig,
+        kind: BackendKind,
+        slots: usize,
+        use_hint: bool,
+    ) -> std::result::Result<Self, crate::backend_options::OpenFailure<EncodeError>> {
         let name = match kind {
             BackendKind::Amf => c"h264_amf",
             BackendKind::Qsv => c"h264_qsv",
             BackendKind::X264 => c"libx264",
             BackendKind::Mf => c"h264_mf",
             BackendKind::OpenH264 => c"libopenh264",
-            _ => return Err(unavailable("backend FFmpeg inválido")),
+            _ => return Err(unavailable("backend FFmpeg inválido").into()),
         };
         // SAFETY: nome NUL; retornos checados antes de uso, propriedade transferida para Session.
         let codec = unsafe { (api.find)(name.as_ptr()) };
         if codec.is_null() {
-            return Err(unavailable(format!("{} ausente no runtime", kind.name())));
+            return Err(unavailable(format!("{} ausente no runtime", kind.name())).into());
         }
         let mut session = Self {
             context: unsafe { (api.alloc)(codec) },
@@ -211,7 +227,7 @@ impl Session {
             api,
         };
         if session.context.is_null() {
-            return Err(unavailable("avcodec_alloc_context3 falhou"));
+            return Err(unavailable("avcodec_alloc_context3 falhou").into());
         }
         let set = |key: &str, value: &str| session.api.set(session.context, key, value);
         set("video_size", &format!("{}x{}", config.width, config.height))?;
@@ -235,51 +251,22 @@ impl Session {
         set("colorspace", "bt709")?;
         set("color_primaries", "bt709")?;
         set("color_trc", "bt709")?;
-        match kind {
-            BackendKind::Amf => {
-                configure_amf(&session.api, session.context)?;
-            }
-            BackendKind::Qsv => {
-                set("preset", "veryfast")?;
-                set("async_depth", "1")?;
-                set("look_ahead", "0")?;
-                set("forced_idr", "1")?;
-            }
-            BackendKind::Mf => {
-                set("hw_encoding", "false")?;
-                set("rate_control", "ld_vbr")?;
-                set("scenario", "display_remoting")?;
-                // mfenc.c enables CODECAPI_AVLowLatencyMode only with LOW_DELAY.
-                // The rate-control name alone does not request this MFT property.
-                set("flags", "+low_delay")?;
-            }
-            BackendKind::OpenH264 => {
-                // libopenh264enc.c (760d1060): o padrão é rc_mode=quality; frame skip devolveria
-                // pacote vazio, então fica desligado de forma explícita.
-                set("rc_mode", "bitrate")?;
-                set("allow_skip_frames", "0")?;
-                // O probe medido usava uma fatia por thread (threads=2); com fatia única o OpenH264
-                // ignora iMultipleThreadIdc. `slices` é opção genérica do AVCodecContext.
-                // O wrapper também força BackgroundDetection/AdaptiveQuant=1 (igual ao probe), mas deixa
-                // iComplexityMode e SceneChangeDetect nos padrões do SDK: sem opção para ajustá-los.
-                set("slices", "2")?;
-            }
-            BackendKind::X264 => {
-                set("preset", "ultrafast")?;
-                set("tune", "zerolatency")?;
-                set("forced-idr", "1")?;
-                set(
-                    "x264-params",
-                    if config.h264_profile == crate::config::H264Profile::ConstrainedBaseline {
-                        "repeat-headers=1:annexb=1:scenecut=0:sliced-threads=1:cabac=0:8x8dct=0"
-                    } else if config.h264_profile == crate::config::H264Profile::Main {
-                        "repeat-headers=1:annexb=1:scenecut=0:sliced-threads=1:cabac=1:8x8dct=0"
-                    } else {
-                        "repeat-headers=1:annexb=1:scenecut=0:sliced-threads=1:cabac=1:8x8dct=1"
-                    },
-                )?;
-            }
-            _ => {}
+        let rejected_hint = if kind == BackendKind::Amf {
+            configure_amf(&session.api, session.context)?;
+            None
+        } else {
+            crate::backend_options::apply_backend_options(kind, config, |key, value| {
+                if kind == BackendKind::Qsv && key == "scenario" && !use_hint {
+                    Ok(())
+                } else {
+                    set(key, value)
+                }
+            })?
+        };
+        let hint_applied =
+            kind == BackendKind::Qsv && config.compat_tuning && use_hint && rejected_hint.is_none();
+        if let Some(error) = rejected_hint {
+            warn_qsv_hint_once(&error);
         }
         // Por último: o usage ultralowlatency do AMF volta o perfil para Main se vier depois.
         set(
@@ -306,21 +293,27 @@ impl Session {
             )?;
         }
         // SAFETY: contexto configurado, codec válido, dicionário opcional nulo.
-        session.api.check(
-            unsafe { (session.api.open)(session.context, codec, ptr::null_mut()) },
-            "avcodec_open2",
-        )?;
+        session
+            .api
+            .check(
+                unsafe { (session.api.open)(session.context, codec, ptr::null_mut()) },
+                "avcodec_open2",
+            )
+            .map_err(|error| crate::backend_options::OpenFailure {
+                error,
+                hint_applied,
+            })?;
         // SAFETY: alocador da API, retorno checado abaixo.
         session.packet = unsafe { (session.api.packet_alloc)() };
         if session.packet.is_null() {
-            return Err(unavailable("av_packet_alloc falhou"));
+            return Err(unavailable("av_packet_alloc falhou").into());
         }
         // Uma referência anterior + entradas em voo + uma superfície livre, sem renovar por frame.
         for _ in 0..slots + 2 {
             // SAFETY: objetos alocados pela biblioteca; só o prefixo ABI validado é acessado.
             let frame = unsafe { (session.api.frame_alloc)() };
             if frame.is_null() {
-                return Err(unavailable("av_frame_alloc falhou"));
+                return Err(unavailable("av_frame_alloc falhou").into());
             }
             session.frames.push(frame);
             // SAFETY: frame válido, dimensões validadas e formato consultado na API carregada.
@@ -485,12 +478,20 @@ struct Pending {
     timing: FrameTiming,
     index: u64,
 }
+#[derive(Clone, Copy)]
+struct Staged {
+    timing: FrameTiming,
+    keyframe: bool,
+    submitted_at: Instant,
+}
 pub(crate) struct FfmpegEncoder {
     session: Session,
     gpu: GpuDevice,
     config: EncoderConfig,
     kind: BackendKind,
     slots: Vec<Slot>,
+    async_staging: Vec<ID3D11Texture2D>,
+    readback_ring: Option<ReadbackRing<Staged>>,
     pending: PendingQueue<Pending>,
     index: u64,
     keyframe: bool,
@@ -501,6 +502,8 @@ pub(crate) struct FfmpegEncoder {
     inplace_rate: bool,
     /// QuickSync só valida o Reset no próximo `avcodec_send_frame`.
     rate_unverified: bool,
+    recovery_keyframe: bool,
+    force_blocking_readback: bool,
 }
 // SAFETY: sessão exclusiva; DLLs/COM retidos, context D3D11 protegido; acesso sempre por &mut.
 unsafe impl Send for FfmpegEncoder {}
@@ -557,6 +560,19 @@ impl FfmpegEncoder {
                 staging: staging.ok_or_else(|| unavailable("staging nulo"))?,
             });
         }
+        let mut async_staging = Vec::new();
+        let readback_ring = if config.async_readback && slots.len() >= 2 {
+            // Existing staging textures are exclusively owned by the delayed path.
+            async_staging.extend(slots.iter().take(3).map(|slot| slot.staging.clone()));
+            Some(ReadbackRing::new(async_staging.len()).map_err(|_| unavailable("anel invalido"))?)
+        } else {
+            if config.async_readback {
+                tracing::warn!(
+                    "Readback assincrono requer ao menos dois slots; usando caminho sincrono"
+                );
+            }
+            None
+        };
         tracing::warn!(
             encoder = kind.name(),
             "Backend de compatibilidade com readback NV12; CPU e impacto no jogo dependem do PC"
@@ -568,12 +584,16 @@ impl FfmpegEncoder {
             kind,
             pending: PendingQueue::new(slots.len()),
             slots,
+            async_staging,
+            readback_ring,
             index: 0,
             keyframe: true,
             eos: false,
             bitstream_profile_level_id,
             inplace_rate: supports_inplace_rate(kind),
             rate_unverified: false,
+            recovery_keyframe: false,
+            force_blocking_readback: false,
         })
     }
     /// Verdadeiro quando a próxima troca de bitrate reabre a sessão (IDR + pausa de centenas de ms).
@@ -587,6 +607,9 @@ impl FfmpegEncoder {
         self.slots.len()
     }
     pub fn encode(&mut self, index: usize, mut timing: FrameTiming) -> Result<()> {
+        if self.readback_ring.is_some() {
+            return self.encode_async(index, timing);
+        }
         if self.eos {
             return Err(EncodeError::SessionFailed);
         }
@@ -700,7 +723,233 @@ impl FfmpegEncoder {
         self.index += 1;
         Ok(())
     }
+    fn encode_async(&mut self, index: usize, mut timing: FrameTiming) -> Result<()> {
+        if self.eos {
+            return Err(EncodeError::SessionFailed);
+        }
+        if self.slots.get(index).is_none() {
+            return Err(EncodeError::InvalidConfig("slot inválido"));
+        }
+        if self.pending.len() >= self.slots.len() {
+            return Err(EncodeError::Busy);
+        }
+        // Send the previous frame before accepting this one. On codec Busy the
+        // caller retries this input; nothing from it has entered the ring yet.
+        if self
+            .readback_ring
+            .as_ref()
+            .is_some_and(|ring| ring.len() > 0)
+        {
+            self.send_readback_head(false)?;
+        }
+        let stage_index = self
+            .readback_ring
+            .as_ref()
+            .and_then(ReadbackRing::next_slot)
+            .ok_or(EncodeError::Busy)?;
+        let source = &self.slots[index];
+        timing.qpc_encode_start = qpc()?;
+        let started = self.config.readback_metrics.then(Instant::now);
+        // SAFETY: source and staging textures share the D3D11 device; GPU copy
+        // precedes later commands on this context even if source is reused.
+        unsafe {
+            self.gpu
+                .context
+                .CopyResource(&self.async_staging[stage_index], &source.texture);
+        }
+        timing.readback_submit_ms = started.map(|at| at.elapsed().as_secs_f64() * 1000.);
+        let staged = Staged {
+            timing,
+            keyframe: self.keyframe,
+            submitted_at: Instant::now(),
+        };
+        self.readback_ring
+            .as_mut()
+            .ok_or(EncodeError::SessionFailed)?
+            .push(staged)
+            .map_err(|_| EncodeError::Busy)?;
+        self.keyframe = false;
+        Ok(())
+    }
+    fn send_readback_head(&mut self, draining: bool) -> Result<bool> {
+        let Some((stage_index, staged, mode)) = self
+            .readback_ring
+            .as_ref()
+            .and_then(|ring| ring.map_head(draining))
+            .map(|(index, staged, mode)| (index, *staged, mode))
+        else {
+            return Ok(false);
+        };
+        let mode = if self.force_blocking_readback {
+            MapMode::Blocking
+        } else {
+            mode
+        };
+        if self.pending.len() >= self.slots.len() {
+            return Err(EncodeError::Busy);
+        }
+        let frame = self
+            .session
+            .frames
+            .iter()
+            .copied()
+            .find(|&frame| {
+                // SAFETY: FFmpeg owns the live frame; writable status is read-only.
+                unsafe { (self.session.api.frame_writable)(frame) > 0 }
+            })
+            .ok_or(EncodeError::Busy)?;
+        let stage = &self.async_staging[stage_index];
+        let mut timing = staged.timing;
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        let started = self.config.readback_metrics.then(Instant::now);
+        let flags = if mode == MapMode::NonBlocking {
+            D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32
+        } else {
+            0
+        };
+        // SAFETY: staging texture is live and `mapped` is writable. On
+        // STILL_DRAWING the mapping did not occur and must not be unmapped.
+        let mut mapped_result = unsafe {
+            self.gpu
+                .context
+                .Map(stage, 0, D3D11_MAP_READ, flags, Some(&mut mapped))
+        };
+        if let Err(error) = &mapped_result
+            && mode == MapMode::NonBlocking
+            && error.code() != DXGI_ERROR_WAS_STILL_DRAWING
+        {
+            // Some drivers reject DO_NOT_WAIT. Stop probing it and keep the
+            // ordered ring on the blocking path for the rest of this session.
+            self.force_blocking_readback = true;
+            tracing::warn!(encoder = self.kind.name(), %error, "Map nao bloqueante falhou; usando Map bloqueante");
+            // SAFETY: failed Map did not map the texture; retry with zero flags.
+            mapped_result = unsafe {
+                self.gpu
+                    .context
+                    .Map(stage, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            };
+        }
+        match mapped_result {
+            Err(error)
+                if mode == MapMode::NonBlocking && error.code() == DXGI_ERROR_WAS_STILL_DRAWING =>
+            {
+                return Ok(false);
+            }
+            Err(error) => {
+                static MAP_FAILURE_WARNING: std::sync::Once = std::sync::Once::new();
+                MAP_FAILURE_WARNING.call_once(|| {
+                    tracing::warn!(encoder = self.kind.name(), %error, "Map de staging falhou; backend precisa ser recriado");
+                });
+                return Err(error.into());
+            }
+            Ok(()) => {}
+        }
+        timing.readback_map_ms = started.map(|at| at.elapsed().as_secs_f64() * 1000.);
+        let started = started.map(|_| Instant::now());
+        // SAFETY: mapped NV12 and FFmpeg frame are live, distinct regions.
+        // Unmap runs even when I420 conversion rejects the source layout.
+        let copied = unsafe {
+            if self.session.i420 {
+                convert_to_i420(&self.config, &mapped, frame)
+            } else {
+                for (plane, rows, source_offset) in [
+                    (0, self.config.height, 0),
+                    (
+                        1,
+                        self.config.height / 2,
+                        self.config.height as usize * mapped.RowPitch as usize,
+                    ),
+                ] {
+                    for row in 0..rows as usize {
+                        ptr::copy_nonoverlapping(
+                            mapped
+                                .pData
+                                .cast::<u8>()
+                                .add(source_offset + row * mapped.RowPitch as usize),
+                            (*frame).data[plane].add(row * (*frame).linesize[plane] as usize),
+                            self.config.width as usize,
+                        );
+                    }
+                }
+                Ok(())
+            }
+        };
+        // SAFETY: this Map succeeded on the same staging subresource.
+        unsafe { self.gpu.context.Unmap(stage, 0) };
+        copied?;
+        timing.readback_copy_ms = started.map(|at| at.elapsed().as_secs_f64() * 1000.);
+        // SAFETY: frame is writable and its public prefix was ABI-checked.
+        unsafe {
+            (*frame).pts = self.index as i64;
+            (*frame).pict_type = if staged.keyframe || self.recovery_keyframe {
+                1
+            } else {
+                0
+            };
+        }
+        let started = started.map(|_| Instant::now());
+        // SAFETY: FFmpeg frame and context are live; send retains what it needs.
+        let status = unsafe { (self.session.api.send)(self.session.context, frame) };
+        timing.codec_send_ms = started.map(|at| at.elapsed().as_secs_f64() * 1000.);
+        if status == -11 {
+            return Err(EncodeError::Busy);
+        }
+        if status < 0 && self.rate_unverified {
+            let error = self.session.api.check(status, "avcodec_send_frame").err();
+            tracing::warn!(
+                encoder = self.kind.name(),
+                ?error,
+                "Troca de bitrate recusada; reabrindo encoder"
+            );
+            self.inplace_rate = false;
+            self.rate_unverified = false;
+            if !self.pending.is_empty() {
+                return Err(EncodeError::SessionFailed);
+            }
+            self.session = Session::new(
+                self.session.api.clone(),
+                &self.config,
+                self.kind,
+                self.slots.len(),
+            )?;
+            self.recovery_keyframe = true;
+            return Err(EncodeError::Busy);
+        }
+        self.session.api.check(status, "avcodec_send_frame")?;
+        self.rate_unverified = false;
+        self.recovery_keyframe = false;
+        timing.qpc_encode_return = qpc()?;
+        self.pending.push_back(Pending {
+            timing,
+            index: self.index,
+        })?;
+        self.index += 1;
+        self.readback_ring
+            .as_mut()
+            .ok_or(EncodeError::SessionFailed)?
+            .complete_head()
+            .ok_or(EncodeError::SessionFailed)?;
+        Ok(true)
+    }
     pub fn poll_into(&mut self, output: &mut AuBuffer, wait: bool) -> Result<bool> {
+        let tail_ready = self
+            .readback_ring
+            .as_ref()
+            .and_then(|ring| ring.map_head(false))
+            .is_some_and(|(_, staged, _)| {
+                let frame_period = Duration::from_secs_f64(
+                    f64::from(self.config.fps.den) / f64::from(self.config.fps.num),
+                );
+                tail_due(staged.submitted_at.elapsed(), frame_period)
+            });
+        // The live runner calls try_poll_into on every loop, even with no new
+        // capture input. A quiet WGC source therefore cannot strand its tail.
+        if (wait || tail_ready) && self.readback_ring.as_ref().is_some_and(|r| r.len() > 0) {
+            match self.send_readback_head(true) {
+                Ok(_) | Err(EncodeError::Busy) => {}
+                Err(error) => return Err(error),
+            }
+        }
         if self.pending.is_empty() {
             return Ok(false);
         }
@@ -751,6 +1000,13 @@ impl FfmpegEncoder {
     }
     pub fn end_of_stream(&mut self) -> Result<()> {
         if !self.eos {
+            while self
+                .readback_ring
+                .as_ref()
+                .is_some_and(|ring| ring.len() > 0)
+            {
+                self.send_readback_head(true)?;
+            }
             // SAFETY: nulo sinaliza EOS; contexto vivo.
             let status = unsafe { (self.session.api.send)(self.session.context, ptr::null()) };
             if status == -11 {
@@ -769,6 +1025,14 @@ impl FfmpegEncoder {
         config.clamp_h264_bitrate();
         if config.bitrate_bps == self.config.bitrate_bps && fps == self.config.fps {
             return Ok(());
+        }
+        // Frames staged before this rate change must enter the old session first.
+        while self
+            .readback_ring
+            .as_ref()
+            .is_some_and(|ring| ring.len() > 0)
+        {
+            self.send_readback_head(true)?;
         }
         if self.inplace_rate && fps == self.config.fps {
             // QuickSync: sem quadros em voo, a recuperação de um Reset recusado pode reabrir a

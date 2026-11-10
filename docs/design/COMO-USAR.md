@@ -58,7 +58,7 @@ A fonte é a Inter que já está em `apps/madscreen-app/public/fonts/inter.woff2
 | Canal de destino no convite ("você entra em # Geral") | `previewInvite` já fornece canal opcional. Exibido somente quando a resposta confirma esse dado. |
 | Cancelar durante "Iniciando" | Usa a ação existente `stopShare`; o botão recebe o rótulo Cancelar nesse estado. |
 | Janela compartilhada fechada durante a live | O design só mostra o aviso; seguir o comportamento atual do app. |
-| Marca "m." | Sem vetor; os PNGs em `assets/Logos` são recortes 1x das capturas. Compor em texto. |
+| Marca "m." | [Símbolo e assinatura em SVG](assets/Logos/README.md), com versões para fundos claros e escuros. |
 
 ## Manutenção no código
 

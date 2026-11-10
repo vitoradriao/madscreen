@@ -28,14 +28,17 @@ impl AutoEncoder {
         bgra: bool,
         requested: Option<BackendKind>,
     ) -> Result<Self> {
+        let mut config = config;
+        config.compat_tuning &= crate::config::compat_tuning_enabled();
         config.validate()?;
         let adapter = crate::platform::device_adapter(&gpu.device)?;
         let (kind, backend) = backend::select(backend::candidates(adapter.vendor_id, requested), |kind| {
-            let result = match kind {
-                BackendKind::Nvenc => NvencEncoder::new(gpu, config.clone(), textures, bgra).map(|e| Backend::Nvenc(Box::new(e))),
+            let effective = crate::config::effective_config(kind, &config);
+            let result = effective.validate().and_then(|_| match kind {
+                BackendKind::Nvenc => NvencEncoder::new(gpu, effective.clone(), textures, bgra).map(|e| Backend::Nvenc(Box::new(e))),
                 _ if bgra => Err(EncodeError::InvalidConfig("AMF/QuickSync/x264 exigem entrada NV12")),
-                _ => FfmpegEncoder::new(gpu, config.clone(), textures, kind).map(|e| Backend::Ffmpeg(Box::new(e))),
-            };
+                _ => FfmpegEncoder::new(gpu, effective, textures, kind).map(|e| Backend::Ffmpeg(Box::new(e))),
+            });
             if let Err(error) = &result { tracing::warn!(encoder=kind.name(), %error, "Encoder indisponível; tentando alternativa"); }
             result
         }).map_err(|errors| EncodeError::EncoderUnavailable(errors.into_iter().map(|(kind, error)| format!("{}: {error}", kind.name())).collect::<Vec<_>>().join("; ")))?;

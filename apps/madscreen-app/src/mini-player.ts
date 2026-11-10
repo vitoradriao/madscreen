@@ -45,7 +45,7 @@ export async function openMiniPlayerWithHost(stage: HTMLElement, title: string, 
     void host.invoke("control_miniplayer", { action: "close", value: null, token }).catch(() => {});
     throw Error("Não foi possível abrir o mini-player."); }
   const placeholder = home.createElement("div");
-  placeholder.className = "placeholder";
+  placeholder.className = "placeholder popout-placeholder";
   placeholder.textContent = "Esta transmissão está no mini-player.";
   const back = home.createElement("button");
   back.className = "btn sm"; back.textContent = "Voltar à janela principal";
@@ -98,14 +98,15 @@ export async function openMiniPlayerWithHost(stage: HTMLElement, title: string, 
     for (const node of home.querySelectorAll('link[rel="stylesheet"],style')) doc.head.append(node.cloneNode(true));
     const style = doc.createElement("style");
     style.textContent = "html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--video-bg);color:var(--text)}body{display:block}.mini-toolbar{position:absolute;z-index:5;top:0;left:0;right:0;display:flex;gap:var(--sp-1);align-items:center;padding:var(--sp-2);background:linear-gradient(var(--scrim),transparent);opacity:0}body:hover .mini-toolbar,body:focus-within .mini-toolbar{opacity:1}.mini-toolbar button{font-size:var(--fs-xs);padding:var(--sp-1) var(--sp-2);background:var(--overlay)}.mini-toolbar span{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}[data-main-window-only]{display:none!important}.stage{position:absolute;inset:0;min-height:0;height:100%!important;aspect-ratio:auto!important;border:0;border-radius:0}.stage .player-top{top:var(--sp-7)}.stage video{width:100%;height:100%;object-fit:contain}.mini-hidden .controls{opacity:0;pointer-events:none}.mini-hidden:focus-within .controls,.mini-hidden:hover .controls{opacity:1;pointer-events:auto}";
+    style.textContent += ".stage .player-top{top:0}body:hover .stage .player-top,body:focus-within .stage .player-top{opacity:0}";
     doc.head.append(style);
     const toolbar = doc.createElement("div"); toolbar.className = "mini-toolbar";
     const caption = doc.createElement("span"); caption.textContent = title;
-    const top = doc.createElement("button"); top.className = "btn sm"; top.textContent = "Fixar"; top.setAttribute("aria-label", "Sempre no topo"); top.setAttribute("aria-pressed", "true");
+    const top = doc.createElement("button"); top.className = "btn sm"; top.textContent = "Fixado"; top.setAttribute("aria-label", "Sempre no topo"); top.setAttribute("aria-pressed", "true");
     top.addEventListener("click", () => {
       const next = top.getAttribute("aria-pressed") !== "true";
       top.disabled = true;
-      void control("top", next).then(() => top.setAttribute("aria-pressed", String(next)))
+      void control("top", next).then(() => { top.setAttribute("aria-pressed", String(next)); top.textContent = next ? "Fixado" : "Fixar no topo"; })
         .catch(() => { top.title = "Não foi possível alterar Sempre no topo."; })
         .finally(() => { top.disabled = false; });
     });
@@ -114,7 +115,7 @@ export async function openMiniPlayerWithHost(stage: HTMLElement, title: string, 
       const hidden = stage.classList.toggle("mini-hidden");
       hide.setAttribute("aria-pressed", String(!hidden));
     });
-    const returnButton = doc.createElement("button"); returnButton.className = "btn sm"; returnButton.textContent = "Voltar"; returnButton.addEventListener("click", () => restore(true));
+    const returnButton = doc.createElement("button"); returnButton.className = "btn sm"; returnButton.textContent = "Voltar ao app"; returnButton.addEventListener("click", () => restore(true));
     toolbar.append(caption, top, hide, returnButton);
     doc.body.replaceChildren(toolbar, stage);
     presentedDocument = doc;
@@ -126,7 +127,10 @@ export async function openMiniPlayerWithHost(stage: HTMLElement, title: string, 
       if (event.key.toLowerCase() === "f") stage.querySelector<HTMLButtonElement>('button[title="Tela cheia"]')?.click();
     });
     stage.style.cssText = "width:100%;flex:1;min-height:0";
+    // Remover/adotar o <video> o pausa e o autoplay não retoma: reinicia a reprodução no novo documento.
+    for (const video of playingVideos) void video.play().catch(() => {});
     await control("show");
+    for (const video of playingVideos) void video.play().catch(() => {});
     returnButton.focus();
     return handle;
   } catch (error) { restore(); throw error; }

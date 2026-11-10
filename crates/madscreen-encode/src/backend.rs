@@ -24,6 +24,17 @@ impl BackendKind {
             Self::OpenH264 => "CPU candidate (OpenH264)",
         }
     }
+    /// Identificador estável, igual à serialização serde (diagnóstico exportado).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Nvenc => "nvenc",
+            Self::Amf => "amf",
+            Self::Qsv => "qsv",
+            Self::X264 => "x264",
+            Self::Mf => "mf",
+            Self::OpenH264 => "openh264",
+        }
+    }
 }
 
 pub fn candidates(vendor_id: u32, requested: Option<BackendKind>) -> Vec<BackendKind> {
@@ -97,6 +108,14 @@ mod tests {
             select(candidates(0, None), |_| Err::<(), _>("falhou")).map_err(|e| e.len()),
             Err(4)
         );
+    }
+    #[test]
+    fn id_matches_serde_name() {
+        use BackendKind::*;
+        // serde(rename_all = "lowercase") serializa o nome da variante em minúsculas.
+        for kind in [Nvenc, Amf, Qsv, X264, Mf, OpenH264] {
+            assert_eq!(kind.id(), format!("{kind:?}").to_lowercase());
+        }
     }
     #[test]
     fn explicit_cpu_candidates_never_enter_automatic_selection() {

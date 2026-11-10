@@ -24,7 +24,7 @@ client.providers=async()=>({discord:true,google:false,firstUser:false});
 client.previewInvite=async()=>({inviter:{displayName:'Ana'},server:{name:'Amigos'},channel:{name:'Geral'}} as any);
 client.beginOAuth=async()=>({url:'https://example.invalid/login',verifier:'demo'} as any);
 client.awaitOAuth=async()=>new Promise(()=>{});
-client.createInvite=async()=>({code:'DEMONSTRACAO',link:'https://example.invalid/i/DEMONSTRACAO',expiresAt:Date.now()+86400000,maxUses:10});
+client.createInvite=async()=>({code:'DEMONSTRACAO',link:'https://example.invalid/i/DEMONSTRACAO',expiresAt:Math.floor(Date.now()/1000)+7*86400,maxUses:5});
 let admin=false,update=false;
 client.request=async(_method,path,body:any)=>{
   if(path==='/api/admin/sfu'){

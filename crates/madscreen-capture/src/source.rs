@@ -20,8 +20,16 @@ impl CaptureSource {
         notify: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, CaptureError> {
         let version = crate::wgc::ffi::windows_version();
-        let backend = if requested == CaptureBackend::Auto {
-            automatic_backend(target, version)
+        let automatic = requested == CaptureBackend::Auto;
+        let backend = if automatic {
+            // Consulta única no início, fora do caminho por frame; desconhecido não força WGC.
+            let hdr_enabled = match target {
+                CaptureTarget::Monitor(monitor) => {
+                    crate::display::monitor_color_info(monitor).hdr_enabled
+                }
+                CaptureTarget::Window(_) => None,
+            };
+            automatic_backend(target, version, hdr_enabled)
         } else {
             requested
         };
@@ -32,7 +40,7 @@ impl CaptureSource {
                     return Err(CaptureError::Unsupported);
                 };
                 Ok(Self::Desktop(DesktopSource::start(
-                    gpu, monitor, options, notify,
+                    gpu, monitor, options, notify, automatic,
                 )?))
             }
             _ => {
@@ -52,6 +60,14 @@ impl CaptureSource {
         let mut source = WgcSource::new(gpu, notify);
         source.start_item(item, options)?;
         Ok(Self::Wgc(source))
+    }
+    /// A Desktop Duplication escolhida pelo automático parou porque o HDR foi ligado no
+    /// monitor durante a sessão: o chamador deve recriar a fonte com WGC (mesmo alvo).
+    pub fn needs_wgc_switch(&self) -> bool {
+        match self {
+            Self::Wgc(_) => false,
+            Self::Desktop(s) => s.hdr_switch_required(),
+        }
     }
     pub fn backend_name(&self) -> &'static str {
         match self {
@@ -94,6 +110,13 @@ impl CaptureSource {
         match self {
             Self::Wgc(s) => s.refresh(options),
             Self::Desktop(s) => s.refresh(),
+        }
+    }
+    /// Best-effort WGC cadence update; Desktop Duplication uses runner pacing.
+    pub fn set_target_fps(&self, fps: Option<u32>) -> bool {
+        match self {
+            Self::Wgc(source) => source.set_target_fps(fps),
+            Self::Desktop(_) => false,
         }
     }
 }
