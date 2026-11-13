@@ -229,8 +229,8 @@ jobs:
           if (-not (Test-Path -LiteralPath $releaseNotes)) { throw 'Notas de release ausentes.' }
           gh release view $releaseTag --repo vitoradriao/madscreen 2>$null
           if ($LASTEXITCODE -eq 0) { throw 'A release ja existe; nao sera sobrescrita.' }
-          $sourceSha = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$releaseTag" --jq .object.sha
-          if ($LASTEXITCODE -ne 0 -or $sourceSha -ne $env:GITHUB_SHA) { throw 'Build deve corresponder a tag de origem (leve).' }
+          $sourceRef = git ls-remote --exit-code origin "refs/tags/$releaseTag"
+          if ($LASTEXITCODE -ne 0 -or ($sourceRef -split '\s+')[0] -ne $env:GITHUB_SHA) { throw 'Build deve corresponder a tag de origem (leve).' }
           gh release create $releaseTag --repo vitoradriao/madscreen --verify-tag --draft --title "madscreen $releaseVersion" --notes-file $releaseNotes
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           gh release upload $releaseTag --repo vitoradriao/madscreen $installerPath "$installerPath.sig" target/release-manifest/latest.json target/release-manifest/SHA256SUMS.txt $downloadAlias "$downloadAlias.sig" "$downloadAlias.sha256"
