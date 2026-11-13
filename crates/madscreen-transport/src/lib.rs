@@ -265,6 +265,7 @@ pub struct LiveKitPublisher {
     sender_history: Arc<madscreen_rtc_stats::SenderHistory>,
     stats_generation: Arc<AtomicU64>,
     audio: Option<AudioPusher>,
+    max_bitrate_bps: u64,
 }
 
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
@@ -342,7 +343,12 @@ impl LiveKitPublisher {
             width: config.width,
             height: config.height,
         };
-        let source = NativeVideoSource::new_encoded(resolution.clone());
+        // Opt-in: a fonte como "tela" (sondagem de banda em tela parada) ainda não foi medida.
+        let source = if std::env::var_os("MADSCREEN_SCREENCAST_SOURCE").is_some() {
+            NativeVideoSource::new_encoded_screencast(resolution.clone())
+        } else {
+            NativeVideoSource::new_encoded(resolution.clone())
+        };
         let (room, mut events) = runtime
             .block_on(async {
                 tokio::time::timeout(
@@ -457,7 +463,20 @@ impl LiveKitPublisher {
             sender_history: Arc::new(madscreen_rtc_stats::SenderHistory::default()),
             stats_generation,
             audio,
+            max_bitrate_bps: config.max_bitrate_bps,
         })
+    }
+
+    /// Pede ao GCC uma sondagem de banda até 2x o teto do encoder: a sondagem vai até 2x a alocação
+    /// (probe_controller.cc), e com o teto do transporte igual ao do encoder a rajada media menos
+    /// que o link (lab 13/nov: 10,6-13,8 Mbps num enlace de 30). O encoder segue na própria alocação.
+    pub fn request_probe(&self) {
+        if let Err(error) = self
+            .room
+            .request_publisher_bandwidth_probe(self.max_bitrate_bps.saturating_mul(2))
+        {
+            tracing::debug!(%error, "pedido de sondagem de banda recusado");
+        }
     }
 
     /// Entrega um access unit Annex B completo. `timestamp_us` é o instante de captura (época Unix).

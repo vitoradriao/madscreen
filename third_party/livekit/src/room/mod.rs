@@ -903,6 +903,26 @@ impl Room {
         self.inner.rtc_engine.drop_disconnected_updates(enabled);
     }
 
+    /// madscreen: asks the publisher's congestion controller for a bandwidth probe up to
+    /// `probe_max_bps`. Raising the transport max bitrate while the estimate is below it makes
+    /// GoogCC's ProbeController probe (probe_controller.cc, SetBitrates), so the max is lowered
+    /// by 1 bps and raised back. No start bitrate: setting one would reset the estimate.
+    pub fn request_publisher_bandwidth_probe(
+        &self,
+        probe_max_bps: u64,
+    ) -> Result<(), libwebrtc::RtcError> {
+        let session = self.inner.rtc_engine.session();
+        let pc = session.publisher().peer_connection();
+        for max_bitrate_bps in [probe_max_bps.saturating_sub(1), probe_max_bps] {
+            pc.set_bitrate(libwebrtc::peer_connection::BitrateSettings {
+                min_bitrate_bps: None,
+                start_bitrate_bps: None,
+                max_bitrate_bps: Some(max_bitrate_bps),
+            })?;
+        }
+        Ok(())
+    }
+
     /// Test-only: the publisher transport's current connection state. Lets a test assert
     /// that teardown really closed the transport, rather than inferring it from room-level
     /// state that can reach `Disconnected` while the transport is still open.

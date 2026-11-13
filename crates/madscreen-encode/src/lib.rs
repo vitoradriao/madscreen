@@ -82,6 +82,8 @@ pub struct AuBuffer {
     pub kind: FrameKind,
     pub timing: FrameTiming,
     pub index: u64,
+    /// QP médio do quadro informado pelo encoder (NVENC); `None` onde o backend não informa.
+    pub qp: Option<u32>,
 }
 pub type EncodedAccessUnit = AuBuffer;
 impl AuBuffer {
@@ -91,6 +93,7 @@ impl AuBuffer {
             kind: FrameKind::Delta,
             timing: FrameTiming::default(),
             index: 0,
+            qp: None,
         }
     }
     pub fn copy_from(&mut self, data: &[u8]) -> Result<()> {

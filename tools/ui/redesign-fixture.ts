@@ -44,10 +44,22 @@ const windows=['Jogo de demonstração','Navegador de demonstração','Editor de
   if(command==='output_options')return [720,1080,1440,2160,0].map(choice=>({choice,label:choice?choice+'p':'Nativa',available:choice===0||choice<=args.height,width:choice?Math.round(choice*16/9):args.width,height:choice||args.height,reduced:false,ultrawide:false,note:null}));
   return null;
 }};
-// Fake SDK delivers a local canvas track; no capture, audio or network session.
+// Vídeo de canvas e faixa de áudio silenciosa, sem capturar tela nem dispositivos.
 const canvas=document.createElement('canvas');canvas.width=1920;canvas.height=1080;
 const ctx=canvas.getContext('2d')!;ctx.fillStyle='#15302c';ctx.fillRect(0,0,1920,1080);ctx.fillStyle='#89e2c0';ctx.font='52px sans-serif';ctx.fillText('Conteúdo fictício · demonstração do player',170,500);
 const video=canvas.captureStream(1).getVideoTracks()[0];
+const silentAudio = new AudioContext().createMediaStreamDestination().stream.getAudioTracks()[0]!;
+function demoTracks(): void {
+  for (const room of Room.instances) {
+    if (room._demo) continue;
+    room._demo = true;
+    for (const streamTrack of [video, silentAudio]) {
+      const remote = track(streamTrack.kind);
+      remote.mediaStreamTrack = streamTrack.clone();
+      room.emit(RoomEvent.TrackSubscribed, remote, publication(streamTrack.kind), { identity: 'p-' + room.connection.token });
+    }
+  }
+}
 class Socket {static OPEN=1;readyState=1;onopen:any;onmessage:any;onclose:any;constructor(){queueMicrotask(()=>{this.onopen?.();this.onmessage?.({data:JSON.stringify({type:'hello',live:true,generation:1})});});}send(){}close(){this.readyState=3;}}
 (window as any).WebSocket=Socket;
 let directory:any,share:any,watch:any,settings:any,updates:any,notice:any;
@@ -67,5 +79,5 @@ function page(id:string){directory.setPage(id);for(const [name,view] of [['share
 const live:any={phase:'live',session_id:1,source:'Jogo de demonstração',encoder:'NVENC',width:1920,height:1080,source_width:1920,source_height:1080,quality_height:1080,fps:60,fps_target:60,bitrate_bps:8000000,bitrate_target_bps:8000000,publishing:true,publishing_connected:true,audio_active:1,privacy_supported:true,privacy_video:'active',privacy_pending:false,message:null,message_is_error:false,diagnostic:null};
 Object.assign(live,{channel_id:'general',server_id:'demo'});
 (window as any).demoMini=()=>openMiniPlayerWithHost(document.querySelector('.stage') as HTMLElement,'Bruno · madscreen',{invoke:async()=>undefined as any,listen:async()=>()=>{}});
-(window as any).demo={shell,page,snapshot,live,shareState:(state:any)=>{const next={...live,...state};share.update(next);directory.setSharing(next.phase!=='idle');notice.setLive(next.phase!=='idle');},directory:(state:any)=>directory.update(state),disconnect:()=>directory.setConnected(false),error:()=>directory.showError(new Error('Não foi possível carregar os servidores. Verifique sua conexão.')),login:()=>mount(createLoginScreen(()=>{})),recovery:()=>{const root=createLoginScreen(()=>{});root.querySelector('.auth-card')!.replaceChildren(createRecoveryNotice('CHAVE-FICTICIA-SEM-VALIDADE',()=>{}));mount(root);},tray:()=>showTrayNotice(async()=>{}),admin:(value:boolean)=>{admin=value;},update:(value:boolean)=>{update=value;},notice:()=>{update=true;return updates.check(true);},tracks:()=>{for(const room of Room.instances){if((room as any)._demo)continue;(room as any)._demo=true;const remote=track('video');remote.mediaStreamTrack=video.clone();room.emit(RoomEvent.TrackSubscribed,remote,publication('video'),{identity:'p-'+room.connection.token});}},buttons:()=>[...document.querySelectorAll('button,summary')].filter((el:any)=>el.getClientRects().length).map(el=>({text:el.textContent,aria:el.getAttribute('aria-label'),key:(el as HTMLElement).dataset.focuskey}))};
+(window as any).demo={shell,page,snapshot,live,shareState:(state:any)=>{const next={...live,...state};share.update(next);directory.setSharing(next.phase!=='idle');notice.setLive(next.phase!=='idle');},directory:(state:any)=>directory.update(state),disconnect:()=>directory.setConnected(false),error:()=>directory.showError(new Error('Não foi possível carregar os servidores. Verifique sua conexão.')),login:()=>mount(createLoginScreen(()=>{})),recovery:()=>{const root=createLoginScreen(()=>{});root.querySelector('.auth-card')!.replaceChildren(createRecoveryNotice('CHAVE-FICTICIA-SEM-VALIDADE',()=>{}));mount(root);},tray:()=>showTrayNotice(async()=>{}),admin:(value:boolean)=>{admin=value;},update:(value:boolean)=>{update=value;},notice:()=>{update=true;return updates.check(true);},tracks: demoTracks,buttons:()=>[...document.querySelectorAll('button,summary')].filter((el:any)=>el.getClientRects().length).map(el=>({text:el.textContent,aria:el.getAttribute('aria-label'),key:(el as HTMLElement).dataset.focuskey}))};
 shell();

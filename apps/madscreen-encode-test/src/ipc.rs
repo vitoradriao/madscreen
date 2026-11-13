@@ -102,6 +102,7 @@ pub fn options_from_request(request: StartRequest) -> Result<Options> {
         options.cf_url = target.url.filter(|v| !v.trim().is_empty());
         options.cf_token = target.token.filter(|v| !v.trim().is_empty());
         options.cf_channel = target.channel_id.filter(|v| !v.trim().is_empty());
+        options.cf_direct_session = target.direct_session_id.filter(|v| !v.trim().is_empty());
         options.cf_profile_level_id = target.profile_level_id.filter(|v| !v.trim().is_empty());
         options.cf_keepalive = true;
     }

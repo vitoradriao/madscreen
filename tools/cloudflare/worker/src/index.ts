@@ -9,6 +9,7 @@ export { StreamDO } from "./stream";
 
 const WEB_PATHS = new Set(["/", "/watch", "/login", "/cf.html"]);
 const OWNER_ID = /^u_[0-9a-f]{16}$/;
+declare const __HUB_REVISION__: string;
 
 function hub(env: Env) {
   return env.HUB.get(env.HUB.idFromName("hub"));
@@ -88,7 +89,7 @@ a{display:inline-block;background:var(--accent);color:var(--accent-fg);padding:v
 }
 
 async function sessionFor(env: Env, uid: string): Promise<{ token: string; exp: number; user: unknown }> {
-  const user = await hub(env).me(uid);
+  const { user } = await hub(env).me(uid);
   const { token, exp } = await signSession(uid, env.SESSION_SECRET);
   return { token, exp, user };
 }
@@ -139,6 +140,7 @@ async function authRoutes(request: Request, env: Env, url: URL): Promise<Respons
   }
   if (method === "POST" && path === "/auth/register") {
     const body = await readJson(request);
+    if (body.code && body.acceptInvite !== true) throw new ApiError(400, "aceite_obrigatorio", "Confirme o convite antes de criar a conta.");
     const result = await hub(env).register(clientIp(request), body.username, body.code, body.displayName);
     return json({ ...await sessionFor(env, result.uid), recoveryKey: result.recoveryKey });
   }
@@ -148,7 +150,8 @@ async function authRoutes(request: Request, env: Env, url: URL): Promise<Respons
     return json(await sessionFor(env, result.uid));
   }
   if (method === "GET" && path === "/api/invites/preview") {
-    return json(await hub(env).previewInvite(clientIp(request), url.searchParams.get("code")));
+    const principal = request.headers.has("Authorization") ? await authenticate(request, env) : null;
+    return json(await hub(env).previewInvite(clientIp(request), url.searchParams.get("code"), principal?.uid));
   }
   return null;
 }
@@ -173,10 +176,11 @@ async function apiRoutes(request: Request, env: Env, url: URL): Promise<Response
   const path = url.pathname;
   const principal = await authenticate(request, env);
   const uid = principal.uid;
-  const mediaSession = { "x-ms-session": hex(await sha256(principal.sessionId)) };
+  const mediaSession = { "x-ms-session": hex(await sha256(principal.sessionId)), "x-ms-session-iat": String(principal.iat) };
 
   if (method === "POST" && path === "/api/logout") {
     const owners = await hub(env).revokeSession(uid, hex(await sha256(principal.sessionId)), principal.exp);
+    await hub(env).cleanDirect();
     await Promise.all(owners.map(owner => {
       const stream = env.STREAM.get(env.STREAM.idFromName(owner));
       return owner === uid ? stream.forceStop(owner) : stream.revokeViewer(uid);
@@ -194,8 +198,7 @@ async function apiRoutes(request: Request, env: Env, url: URL): Promise<Response
   }
   if (path === "/api/me") {
     if (method === "GET") {
-      const user = await hub(env).me(uid);
-      const recoveryKey = await hub(env).hasRecoveryKey(uid);
+      const { user, recoveryKey } = await hub(env).me(uid);
       const refresh = Math.floor(Date.now() / 1000) - principal.iat > 30 * 86400
         ? await signSession(uid, env.SESSION_SECRET, Math.floor(Date.now() / 1000), principal.sessionId) : null;
       return json({ user, account: { recoveryKey }, ...(refresh ? { token: refresh.token, exp: refresh.exp } : {}) });
@@ -207,6 +210,7 @@ async function apiRoutes(request: Request, env: Env, url: URL): Promise<Response
     if (method === "DELETE") {
       const owners = await hub(env).activeMediaOwners(uid);
       await hub(env).deleteMe(uid);
+      await hub(env).cleanDirect();
       await Promise.all(owners.map(owner => owner === uid
         ? env.STREAM.get(env.STREAM.idFromName(owner)).forceStop(uid)
         : env.STREAM.get(env.STREAM.idFromName(owner)).revokeViewer(uid)));
@@ -214,7 +218,10 @@ async function apiRoutes(request: Request, env: Env, url: URL): Promise<Response
     }
   }
   if (method === "POST" && path === "/api/me/recovery-key") {
-    return json({ recoveryKey: await hub(env).rotateRecoveryKey(uid) });
+    const recoveryKey = await hub(env).rotateRecoveryKey(uid);
+    // Emitida depois do corte gravado em rotateRecoveryKey, então esta sessão continua valendo.
+    const session = await signSession(uid, env.SESSION_SECRET);
+    return json({ recoveryKey, token: session.token, exp: session.exp, user: (await hub(env).me(uid)).user });
   }
   const changeDirectory = async (action: string, target: string, value?: unknown, memberId?: string): Promise<Response> => {
     const result = await hub(env).changeDirectory(uid, action, target, value, memberId);
@@ -260,6 +267,9 @@ async function apiRoutes(request: Request, env: Env, url: URL): Promise<Response
     if (method === "PATCH" && memberRoute[2] !== "me") return changeDirectory("role", memberRoute[1], (await readJson(request)).role, memberRoute[2]);
   }
   const serverInvite = /^\/api\/servers\/([A-Za-z0-9_]{1,64})\/invites$/.exec(path);
+  const transfer = /^\/api\/servers\/([A-Za-z0-9_]{1,64})\/owner$/.exec(path);
+  if (method === "POST" && transfer?.[1]) return changeDirectory("transfer", transfer[1], undefined, textField((await readJson(request)).memberId, 64));
+  if (method === "GET" && serverInvite?.[1]) return json(await hub(env).listInvites(uid, serverInvite[1]));
   if (method === "POST" && serverInvite?.[1]) {
     const body = await readJson(request);
     const invite = await hub(env).createInvite(uid, serverInvite[1], body.channelId);
@@ -270,14 +280,29 @@ async function apiRoutes(request: Request, env: Env, url: URL): Promise<Response
   if (method === "POST" && path === "/api/friends/accept") return json(await hub(env).answerRequest(uid, (await readJson(request)).id, true));
   if (method === "POST" && path === "/api/friends/decline") return json(await hub(env).answerRequest(uid, (await readJson(request)).id, false));
   const removal = /^\/api\/friends\/(u_[0-9a-f]{16})$/.exec(path);
-  if (method === "DELETE" && removal?.[1]) return json(await hub(env).removeFriend(uid, removal[1]));
+  if (method === "DELETE" && removal?.[1]) {
+    const snapshot = await hub(env).removeFriend(uid, removal[1]);
+    await hub(env).cleanDirect();
+    return json(snapshot);
+  }
+  if (path === "/api/direct" && method === "POST") return json(await hub(env).startDirect(uid, (await readJson(request)).peerId));
+  const directRoute = /^\/api\/direct\/(d_[a-f0-9]{32})(\/decline)?$/.exec(path);
+  if (directRoute?.[1]) {
+    if (method === "POST" && directRoute[2]) { await hub(env).declineDirect(uid, directRoute[1]); return json({ ok: true }); }
+    if (method === "DELETE" && !directRoute[2]) { await hub(env).endDirect(uid, directRoute[1]); await hub(env).cleanDirect(); return json({ ok: true }); }
+  }
+  if (method === "GET" && path === "/api/invites") return json(await hub(env).listInvites(uid));
+  const revokeInvite = /^\/api\/invites\/([A-Z0-9]{4}-[A-Z0-9]{4})$/.exec(path);
+  if (method === "DELETE" && revokeInvite?.[1]) { await hub(env).revokeInvite(uid, revokeInvite[1]); return json({ ok: true }); }
   if (method === "POST" && path === "/api/invites") {
     const body = await readJson(request);
-    const invite = await hub(env).createInvite(uid, body.serverId, body.channelId);
+    const invite = await hub(env).createInvite(uid, body.serverId, body.channelId, body.kind ?? "server");
     return json({ ...invite, link: `${url.origin}/i/${invite.code}` });
   }
   if (method === "POST" && path === "/api/invites/redeem") {
-    return json(await hub(env).redeemInvite(uid, clientIp(request), (await readJson(request)).code));
+    const body = await readJson(request);
+    if (body.accept !== true) throw new ApiError(400, "aceite_obrigatorio", "Confirme o convite para continuar.");
+    return json(await hub(env).redeemInvite(uid, clientIp(request), body.code));
   }
   if (method === "GET" && path === "/api/ice") return json(await iceServers(env));
   if (method === "GET" && path === "/api/sfu") return json({ provider: await selectedProvider(env), layers: ["h"] });
@@ -286,8 +311,10 @@ async function apiRoutes(request: Request, env: Env, url: URL): Promise<Response
 
   // Publicador: sempre a própria transmissão.
   if (method === "POST" && /^\/api\/share\/(start|heartbeat|stop)$/.test(path)) {
-    const target = path === "/api/share/start" ? await hub(env).resolveShare(uid, (await readJson(request.clone())).channelId) : null;
-    return forward(request, stream(uid), { ...mediaSession, "x-ms-uid": uid, "x-ms-name": target?.displayName ?? uid, "x-ms-owner": uid, ...(target ? { "x-ms-channel": target.channelId } : {}) });
+    const body = path === "/api/share/start" ? await readJson(request.clone()) : null;
+    if (body && (body.directSessionId && body.channelId || body.destination && (body.directSessionId || body.channelId))) invalidBody();
+    const target = body ? await hub(env).resolveShare(uid, body.destination ?? (body.directSessionId ? { kind: "direct", sessionId: body.directSessionId } : body.channelId), true) : null;
+    return forward(request, stream(uid), { ...mediaSession, "x-ms-uid": uid, "x-ms-name": target?.displayName ?? uid, "x-ms-owner": uid, ...(target ? { "x-ms-destination": JSON.stringify(target.destination), ...(target.destination.kind === "channel" ? { "x-ms-channel": target.destination.channelId } : {}) } : {}) });
   }
 
   // Espectador: só amigos (o Hub confere); depois do start o viewerId já carrega o dono.
@@ -321,7 +348,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === "OPTIONS") return new Response(null, { status: 204 });
   if (request.method === "GET") {
-    if (url.pathname === "/health") return json({ ok: true, version: 3 });
+    if (url.pathname === "/health") return json({ ok: true, version: 4, revision: typeof __HUB_REVISION__ === "undefined" ? "development" : __HUB_REVISION__, capabilities: ["explicit-destination", "personal-invites", "direct-sessions"] });
     let download: URL | null = null;
     try { const configuredUrl = new URL(env.APP_DOWNLOAD_URL ?? ""); if (configuredUrl.protocol === "https:" && !configuredUrl.username && !configuredUrl.password) download = configuredUrl; } catch { /* Download ainda não configurado. */ }
     if (url.pathname === "/app/info") return json({ downloadAvailable: download !== null });

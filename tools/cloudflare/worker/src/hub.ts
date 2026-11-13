@@ -5,6 +5,7 @@ import { safeAvatar } from "./oauth";
 import { ServerDirectory, type InviteDestination, type DirectoryChange } from "./servers";
 import { SfuControl, failoverEnabled } from "./sfu-control";
 import { activeProvider, type ProviderId } from "./sfu";
+import { DirectDirectory, type StreamDestination } from "./direct";
 
 /**
  * Diretório global (instância única "hub"): usuários, identidades OAuth, amizades, convites,
@@ -27,6 +28,7 @@ export interface LiveInfo {
   since: number;
   viewers: number;
   title: string | null;
+  destination?: StreamDestination;
 }
 export interface FriendView extends UserView {
   online: boolean;
@@ -39,6 +41,9 @@ export interface Snapshot {
   outgoing: UserView[];
   servers: ReturnType<ServerDirectory["list"]>;
   destination?: InviteDestination;
+  inviter?: string;
+  inviteStatus?: "accepted" | "already_redeemed";
+  directSessions: { id: string; peerId: string; reconnecting: boolean; declined: boolean }[];
 }
 export interface OAuthProfile {
   sub: string;
@@ -97,6 +102,7 @@ function cleanCode(value: unknown): string {
 export class HubDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
   private readonly directory: ServerDirectory;
+  private readonly direct: DirectDirectory;
   private readonly lastSnapshots = new WeakMap<WebSocket, string>();
   private sfuControl: SfuControl | null = null;
 
@@ -120,6 +126,8 @@ export class HubDO extends DurableObject<Env> {
         challenge TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS revoked_sessions (
         digest TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_cutoffs (
+        user_id TEXT PRIMARY KEY, issued_after INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS rate (
         key TEXT PRIMARY KEY, window_start INTEGER NOT NULL, count INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS live (
@@ -131,6 +139,11 @@ export class HubDO extends DurableObject<Env> {
       // Coluna já existe.
     }
     this.directory = new ServerDirectory(ctx.storage);
+    for (const [table, column, type] of [["invites", "kind", "TEXT NOT NULL DEFAULT 'server'"], ["invites", "revoked", "INTEGER NOT NULL DEFAULT 0"], ["live", "direct_id", "TEXT"]]) {
+      if (!this.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().some(row => row.name === column)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
+    this.sql.exec("CREATE TABLE IF NOT EXISTS invite_redemptions (code TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(code,user_id))");
+    this.direct = new DirectDirectory(this.sql, uid => this.online(uid));
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
     if (failoverEnabled(env)) void ctx.blockConcurrencyWhile(async () => {
       if (await ctx.storage.getAlarm() === null) await ctx.storage.setAlarm(Date.now() + 30_000);
@@ -169,29 +182,73 @@ export class HubDO extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
-    if (!failoverEnabled(this.env)) return;
-    try { await this.mediaControl().check(); }
-    finally { await this.ctx.storage.setAlarm(Date.now() + 30_000); }
+    try {
+      this.direct.expire();
+      await this.cleanDirect();
+      if (failoverEnabled(this.env)) await this.mediaControl().check();
+    } finally {
+      if (failoverEnabled(this.env) || this.direct.needsAlarm()) await this.ctx.storage.setAlarm(Date.now() + 1000);
+    }
+  }
+
+  private async scheduleDirect(): Promise<void> {
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || alarm > Date.now() + 1000) await this.ctx.storage.setAlarm(Date.now() + 1000);
+  }
+
+  async cleanDirect(): Promise<void> {
+    for (const row of this.direct.pending()) {
+      await Promise.all([row.a, row.b].map(uid => this.env.STREAM.get(this.env.STREAM.idFromName(uid)).forceStopDirect(uid, row.id)));
+      this.direct.cleaned(row.id);
+      this.push(row.a); this.push(row.b);
+    }
+  }
+
+  async startDirect(uid: string, peerInput: unknown) {
+    this.require(uid);
+    await this.rateLimit(`direct:${uid}`, 10, 60);
+    const session = this.direct.start(uid, textField(peerInput, 64));
+    await this.scheduleDirect();
+    this.push(session.a); this.push(session.b);
+    return { sessionId: session.id };
+  }
+
+  async endDirect(uid: string, sessionId: string): Promise<void> {
+    const session = this.direct.require(uid, sessionId);
+    this.direct.end(session.id);
+    await this.scheduleDirect();
+    this.push(session.a); this.push(session.b);
+  }
+
+  async declineDirect(uid: string, sessionId: string): Promise<void> {
+    const session = this.direct.require(uid, sessionId);
+    this.direct.decline(uid, sessionId);
+    this.push(session.a); this.push(session.b);
   }
 
   // ---- utilidades ---------------------------------------------------------------------------
 
-  assertSession(uid: string, digest: string): void {
+  assertSession(uid: string, digest: string, iat: number): void {
     this.require(uid);
     if (this.sql.exec("SELECT digest FROM revoked_sessions WHERE digest = ? AND expires > ?", digest, Math.floor(Date.now() / 1000)).toArray().length) {
       throw new ApiError(401, "sessao_revogada", "Esta sessão foi encerrada. Entre novamente.");
     }
+    // shortcut: sessão emitida no mesmo segundo da troca da chave ainda vale; upgrade se a conta exigir corte exato.
+    const cutoff = this.sql.exec<{ issued_after: number }>("SELECT issued_after FROM session_cutoffs WHERE user_id = ?", uid).toArray()[0];
+    if (cutoff && iat < cutoff.issued_after) throw new ApiError(401, "sessao_revogada", "Esta sessão foi encerrada. Entre novamente.");
   }
 
   activeMediaOwners(uid: string): string[] {
     this.require(uid);
-    return [...new Set([uid, ...this.sql.exec<{ user_id: string }>(
+    return [...new Set([uid, ...this.direct.list(uid).flatMap(row => [row.a, row.b]), ...this.sql.exec<{ user_id: string }>(
       "SELECT DISTINCT live.user_id FROM live JOIN channels ON channels.id = live.channel_id JOIN members ON members.server_id = channels.server_id WHERE members.user_id = ?", uid
     ).toArray().map(row => row.user_id)])];
   }
 
   revokeSession(uid: string, digest: string, exp: number): string[] {
     const owners = this.activeMediaOwners(uid);
+    this.direct.endFor(uid);
+    void this.scheduleDirect();
     this.sql.exec("DELETE FROM revoked_sessions WHERE expires <= ?", Math.floor(Date.now() / 1000));
     this.sql.exec("INSERT OR REPLACE INTO revoked_sessions (digest, expires) VALUES (?, ?)", digest, Math.max(exp, Math.floor(Date.now() / 1000) + 90 * 86400));
     for (const socket of this.ctx.getWebSockets(`u:${uid}`)) {
@@ -249,10 +306,15 @@ export class HubDO extends DurableObject<Env> {
       const user = this.find(row.other);
       if (!user) continue;
       if (row.status === "accepted") {
-        const live = this.sql.exec<{ title: string | null; since: number; viewers: number }>(
+        let live: LiveInfo | undefined = this.sql.exec<{ title: string | null; since: number; viewers: number }>(
           "SELECT l.title,l.since,l.viewers FROM live l JOIN channels c ON c.id = l.channel_id JOIN members m ON m.server_id = c.server_id WHERE l.user_id = ? AND l.updated >= ? AND m.user_id = ?", user.id, now() - LIVE_TTL, uid,
         ).toArray()[0];
-        friends.push({ ...this.view(user), online: this.online(user.id), live: live ? { since: live.since, viewers: live.viewers, title: live.title } : null });
+        const directLive = this.sql.exec<{ title: string | null; since: number; viewers: number; direct_id: string }>("SELECT title,since,viewers,direct_id FROM live WHERE user_id = ? AND direct_id IS NOT NULL AND updated >= ?", user.id, now() - LIVE_TTL).toArray()[0];
+        if (directLive) {
+          try { this.direct.require(uid, directLive.direct_id); live = { title: directLive.title, since: directLive.since, viewers: directLive.viewers, destination: { kind: "direct", sessionId: directLive.direct_id } }; }
+          catch { /* A private audience never falls back to common servers. */ }
+        }
+        friends.push({ ...this.view(user), online: this.online(user.id), live: live ? { since: live.since, viewers: live.viewers, title: live.title, ...(live.destination ? { destination: live.destination } : {}) } : null });
       } else if (row.requester === uid) {
         outgoing.push(this.view(user));
       } else {
@@ -260,7 +322,8 @@ export class HubDO extends DurableObject<Env> {
       }
     }
     friends.sort((x, y) => Number(y.live !== null) - Number(x.live !== null) || Number(y.online) - Number(x.online) || x.displayName.localeCompare(y.displayName));
-    return { me: this.view(me), friends, incoming, outgoing, servers: this.directory.list(uid, id => this.online(id)) };
+    return { me: this.view(me), friends, incoming, outgoing, servers: this.directory.list(uid, id => this.online(id)),
+      directSessions: this.direct.list(uid).filter(row => !this.direct.expired(row)).map(row => ({ id: row.id, peerId: row.a === uid ? row.b : row.a, reconnecting: row.absent_a !== null || row.absent_b !== null, declined: (row.a === uid ? row.declined_a : row.declined_b) === 1 })) };
   }
 
   private push(uid: string): void {
@@ -311,12 +374,13 @@ export class HubDO extends DurableObject<Env> {
   }
 
   private readInvite(code: string) {
-    const row = this.sql.exec<{ user_id: string; expires: number; max_uses: number; uses: number; channel_id: string | null }>(
-      "SELECT user_id,expires,max_uses,uses,channel_id FROM invites WHERE code = ?", code,
+    const row = this.sql.exec<{ user_id: string; expires: number; max_uses: number; uses: number; channel_id: string | null; kind: "personal" | "server"; revoked: number }>(
+      "SELECT user_id,expires,max_uses,uses,channel_id,kind,revoked FROM invites WHERE code = ?", code,
     ).toArray()[0];
-    if (!row || !this.find(row.user_id) || !row.channel_id) throw new ApiError(404, "convite_invalido", "Este convite não é válido.");
+    if (!row || !this.find(row.user_id)) throw new ApiError(404, "convite_invalido", "Este convite não é válido.");
+    if (row.revoked) throw new ApiError(410, "convite_revogado", "Este convite foi revogado. Peça um novo convite.");
     if (row.expires <= now()) throw new ApiError(410, "convite_expirado", "Este convite expirou. Peça um novo convite.");
-    const destination = this.directory.destination(row.channel_id);
+    const destination = row.kind === "server" ? this.directory.destination(row.channel_id ?? "") : undefined;
     return { ...row, destination };
   }
 
@@ -328,15 +392,16 @@ export class HubDO extends DurableObject<Env> {
   }
 
   /** Resgate idempotente: reabrir um convite válido não gasta uso de quem já é membro. */
-  private acceptInvite(uid: string, code: string): { inviter: string; destination: InviteDestination } {
+  private acceptInvite(uid: string, code: string): { inviter: string; destination?: InviteDestination; inviteStatus: "accepted" | "already_redeemed" } {
     return this.ctx.storage.transactionSync(() => {
       const row = this.readInvite(code);
-      if (!this.directory.isMember(uid, row.destination.serverId)) {
-        this.takeInvite(code);
-        this.directory.join(uid, row.destination);
-      }
-      if (uid !== row.user_id) this.befriend(uid, row.user_id);
-      return { inviter: row.user_id, destination: row.destination };
+      if (uid === row.user_id) throw new ApiError(400, "convite_proprio", "Você não pode aceitar seu próprio convite.");
+      if (this.sql.exec("SELECT code FROM invite_redemptions WHERE code = ? AND user_id = ?", code, uid).toArray().length) return { inviter: row.user_id, inviteStatus: "already_redeemed", ...(row.destination && this.directory.isMember(uid, row.destination.serverId) ? { destination: row.destination } : {}) };
+      this.takeInvite(code);
+      if (row.kind === "personal") this.befriend(uid, row.user_id);
+      else if (row.destination) this.directory.join(uid, row.destination);
+      this.sql.exec("INSERT INTO invite_redemptions (code,user_id) VALUES (?,?)", code, uid);
+      return { inviter: row.user_id, inviteStatus: "accepted", ...(row.destination ? { destination: row.destination } : {}) };
     });
   }
 
@@ -358,13 +423,10 @@ export class HubDO extends DurableObject<Env> {
       // O hash cede a execução: confira o nome novamente antes de consumir o convite.
       if (this.findByName(username)) throw new ApiError(409, "usuario_em_uso", "Este nome de usuário já existe.");
       const count = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM users").toArray()[0]?.n ?? 0;
-      let invitation: ReturnType<HubDO["takeInvite"]> | null = null;
-      if (count > 0 || (typeof codeInput === "string" && codeInput.trim())) invitation = this.takeInvite(cleanCode(codeInput));
+      const code = count > 0 || (typeof codeInput === "string" && codeInput.trim()) ? cleanCode(codeInput) : null;
+      if (code) this.readInvite(code);
       const created = this.createUser(username, display, null, recoveryHash);
-      if (invitation) {
-        this.directory.join(created.id, invitation.destination);
-        this.befriend(created.id, invitation.user_id);
-      } else this.directory.defaultChannel(created.id);
+      if (code) this.acceptInvite(created.id, code);
       return created;
     });
     this.pushWithFriends(user.id);
@@ -414,14 +476,8 @@ export class HubDO extends DurableObject<Env> {
     } else {
       this.sql.exec("UPDATE users SET avatar = COALESCE(?, avatar), last_seen = ? WHERE id = ?", profile.avatar, now(), uid);
     }
-    if (row.invite) {
-      try {
-        this.acceptInvite(uid, row.invite);
-      } catch {
-        // Convite vencido no meio do login não deve impedir a entrada.
-      }
-    }
-    if (!this.directory.peerIds(uid).length) this.directory.defaultChannel(uid);
+    // The authenticated client presents the invitation again for explicit consent.
+    // OAuth itself grants neither friendship nor server membership.
     this.sql.exec("INSERT OR REPLACE INTO handoff (challenge, user_id, expires) VALUES (?, ?, ?)", row.challenge, uid, now() + 300);
     this.pushWithFriends(uid);
   }
@@ -436,22 +492,24 @@ export class HubDO extends DurableObject<Env> {
 
   // ---- conta --------------------------------------------------------------------------------
 
-  async me(uid: string): Promise<UserView> {
-    return this.view(this.require(uid));
-  }
-
   /** Conta criada com nome de usuário entra com chave de recuperação; conta de Discord/Google não. */
-  async hasRecoveryKey(uid: string): Promise<boolean> {
-    return this.require(uid).recovery_hash !== null;
+  async me(uid: string): Promise<{ user: UserView; recoveryKey: boolean }> {
+    const row = this.require(uid);
+    return { user: this.view(row), recoveryKey: row.recovery_hash !== null };
   }
 
-  /** Troca a chave de recuperação de quem está conectado. A chave antiga deixa de valer na hora. */
+  /** Troca a chave de recuperação e derruba as sessões emitidas antes desta troca. */
   async rotateRecoveryKey(uid: string): Promise<string> {
     const user = this.require(uid);
     if (!user.recovery_hash) throw new ApiError(409, "sem_chave", "Esta conta entra pelo Discord ou Google e não usa chave de recuperação.");
     await this.rateLimit(`recovery:${uid}`, 5, 3600);
     const recoveryKey = [randomCode(5), randomCode(5), randomCode(5), randomCode(5)].join("-");
     this.sql.exec("UPDATE users SET recovery_hash = ? WHERE id = ?", await hashSecret(recoveryKey), uid);
+    this.sql.exec("INSERT OR REPLACE INTO session_cutoffs (user_id, issued_after) VALUES (?, ?)", uid, Math.floor(Date.now() / 1000));
+    // Cada aparelho confirma em /api/me: o que trocou segue com o token novo, os outros saem. O stream não é tocado.
+    for (const socket of this.ctx.getWebSockets(`u:${uid}`)) {
+      try { socket.close(4001, "sessao encerrada"); } catch { /* Already closed. */ }
+    }
     return recoveryKey;
   }
 
@@ -465,10 +523,13 @@ export class HubDO extends DurableObject<Env> {
 
   async deleteMe(uid: string): Promise<void> {
     this.require(uid);
+    if (this.sql.exec("SELECT id FROM servers WHERE owner_id = ? LIMIT 1", uid).toArray().length) throw new ApiError(409, "transfira_propriedade", "Transfira ou exclua seus servidores antes de excluir a conta.");
+    this.direct.endFor(uid);
+    await this.scheduleDirect();
     const friends = [...new Set([...this.friendIds(uid), ...this.directory.peerIds(uid)])];
     const memberships = this.sql.exec<{ server_id: string }>("SELECT server_id FROM members WHERE user_id = ?", uid).toArray();
     for (const membership of memberships) this.directory.leave(uid, membership.server_id);
-    for (const table of ["identities", "invites", "live", "handoff"]) this.sql.exec(`DELETE FROM ${table} WHERE user_id = ?`, uid);
+    for (const table of ["identities", "invites", "live", "handoff", "session_cutoffs"]) this.sql.exec(`DELETE FROM ${table} WHERE user_id = ?`, uid);
     this.sql.exec("DELETE FROM friends WHERE a = ? OR b = ?", uid, uid);
     this.sql.exec("DELETE FROM users WHERE id = ?", uid);
     for (const socket of this.ctx.getWebSockets(`u:${uid}`)) {
@@ -529,6 +590,8 @@ export class HubDO extends DurableObject<Env> {
     this.require(uid);
     const [a, b] = this.pair(uid, otherId);
     this.sql.exec("DELETE FROM friends WHERE a = ? AND b = ?", a, b);
+    this.direct.endFor(uid, otherId);
+    await this.scheduleDirect();
     this.push(uid);
     this.push(otherId);
     return this.snapshot(uid);
@@ -536,30 +599,50 @@ export class HubDO extends DurableObject<Env> {
 
   // ---- convites -----------------------------------------------------------------------------
 
-  async createInvite(uid: string, serverInput?: unknown, channelInput?: unknown) {
+  async createInvite(uid: string, serverInput?: unknown, channelInput?: unknown, kind: unknown = "server") {
     await this.rateLimit(`invite:${uid}`, 20, 600);
     this.require(uid);
-    const destination = this.directory.inviteTarget(uid,
+    if (kind !== "personal" && kind !== "server") invalidBody();
+    const destination = kind === "personal" ? undefined : this.directory.inviteTarget(uid,
       serverInput === undefined ? undefined : textField(serverInput, 64),
       channelInput === undefined ? undefined : textField(channelInput, 64));
-    this.sql.exec("DELETE FROM invites WHERE expires <= ?", now());
-    const active = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM invites WHERE user_id = ? AND uses < max_uses", uid).toArray()[0]?.n ?? 0;
+    const active = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM invites WHERE user_id = ? AND uses < max_uses AND revoked = 0 AND expires > ?", uid, now()).toArray()[0]?.n ?? 0;
     if (active >= MAX_ACTIVE_INVITES) throw new ApiError(429, "limite_convites", "Você já tem convites demais ativos. Aguarde algum expirar.");
     let code: string;
     do { const raw = randomCode(8); code = `${raw.slice(0, 4)}-${raw.slice(4)}`; }
     while (this.sql.exec("SELECT code FROM invites WHERE code = ?", code).toArray().length);
     const expiresAt = now() + INVITE_TTL;
-    this.sql.exec("INSERT INTO invites (code,user_id,expires,max_uses,uses,server_id,channel_id) VALUES (?,?,?,?,0,?,?)", code, uid, expiresAt, INVITE_USES, destination.serverId, destination.channelId);
-    return { code, expiresAt, maxUses: INVITE_USES, destination };
+    const maxUses = kind === "personal" ? 1 : INVITE_USES;
+    this.sql.exec("INSERT INTO invites (code,user_id,expires,max_uses,uses,server_id,channel_id,kind) VALUES (?,?,?,?,0,?,?,?)", code, uid, expiresAt, maxUses, destination?.serverId ?? null, destination?.channelId ?? null, kind);
+    return { code, kind, expiresAt, maxUses, destination };
   }
 
-  async previewInvite(ip: string, codeInput: unknown) {
+  async listInvites(uid: string, serverId?: string) {
+    this.require(uid);
+    if (serverId) this.directory.assertManage(uid, serverId);
+    return this.sql.exec<{ code: string; kind: string; expires: number; max_uses: number; uses: number; revoked: number }>(serverId
+      ? "SELECT code,kind,expires,max_uses,uses,revoked FROM invites WHERE server_id = ? ORDER BY expires DESC"
+      : "SELECT code,kind,expires,max_uses,uses,revoked FROM invites WHERE user_id = ? AND kind = 'personal' ORDER BY expires DESC", serverId ?? uid).toArray();
+  }
+
+  async revokeInvite(uid: string, input: string): Promise<void> {
+    this.require(uid);
+    const code = cleanCode(input);
+    const row = this.sql.exec<{ user_id: string; server_id: string | null; kind: string }>("SELECT user_id,server_id,kind FROM invites WHERE code = ?", code).toArray()[0];
+    if (!row) throw new ApiError(404, "convite_invalido", "Convite não encontrado.");
+    if (row.kind === "server" && row.server_id) this.directory.assertManage(uid, row.server_id);
+    else if (row.user_id !== uid) throw new ApiError(403, "sem_permissao", "Este convite pertence a outra pessoa.");
+    this.sql.exec("UPDATE invites SET revoked = 1 WHERE code = ?", code);
+  }
+
+  async previewInvite(ip: string, codeInput: unknown, uid?: string) {
     await this.rateLimit(`prev:${ip}`, 30, 600);
-    const row = this.readInvite(cleanCode(codeInput));
-    if (row.uses >= row.max_uses) throw new ApiError(410, "convite_esgotado", "Este convite atingiu o limite de usos. Peça um novo convite.");
-    return { inviter: this.view(this.require(row.user_id)), expiresAt: row.expires,
-      server: { id: row.destination.serverId, name: row.destination.serverName },
-      channel: { id: row.destination.channelId, name: row.destination.channelName } };
+    const code = cleanCode(codeInput);
+    const row = this.readInvite(code);
+    const redeemed = uid ? this.sql.exec("SELECT code FROM invite_redemptions WHERE code = ? AND user_id = ?", code, uid).toArray().length > 0 : false;
+    if (!redeemed && row.uses >= row.max_uses) throw new ApiError(410, "convite_esgotado", "Este convite atingiu o limite de usos. Peça um novo convite.");
+    return { kind: row.kind, redeemed, inviter: this.view(this.require(row.user_id)), expiresAt: row.expires, maxUses: row.max_uses, uses: row.uses,
+      ...(row.destination ? { server: { id: row.destination.serverId, name: row.destination.serverName }, channel: { id: row.destination.channelId, name: row.destination.channelName } } : {}) };
   }
 
   async redeemInvite(uid: string, ip: string, codeInput: unknown): Promise<Snapshot> {
@@ -567,7 +650,7 @@ export class HubDO extends DurableObject<Env> {
     this.require(uid);
     const joined = this.acceptInvite(uid, cleanCode(codeInput));
     this.pushWithFriends(uid);
-    return { ...this.snapshot(uid), destination: joined.destination };
+    return { ...this.snapshot(uid), ...(joined.destination ? { destination: joined.destination } : {}), inviter: joined.inviter, inviteStatus: joined.inviteStatus };
   }
 
   // ---- servidores e canais ------------------------------------------------------------------
@@ -594,54 +677,66 @@ export class HubDO extends DurableObject<Env> {
       case "leave": cleanup = this.directory.leave(uid, target); break;
       case "kick": cleanup = this.directory.removeMember(uid, target, textField(memberId, 64)); break;
       case "role": this.directory.setRole(uid, target, textField(memberId, 64), value); notify = this.directory.memberIds(target); break;
+      case "transfer": this.directory.transfer(uid, target, textField(memberId, 64)); notify = this.directory.memberIds(target); break;
       default: invalidBody();
     }
     for (const peer of new Set([uid, ...notify, ...(cleanup?.notify ?? [])])) this.push(peer);
     return { snapshot: { ...this.snapshot(uid), ...(destination ? { destination } : {}) }, cleanup };
   }
 
-  async resolveShare(uid: string, channelInput?: unknown): Promise<InviteDestination & { displayName: string }> {
+  async resolveShare(uid: string, input?: unknown, starting = false): Promise<{ displayName: string; destination: StreamDestination }> {
     const user = this.require(uid);
-    const destination = channelInput === undefined || channelInput === null ? this.directory.defaultChannel(uid)
-      : this.directory.destination(textField(channelInput, 64), uid);
-    return { ...destination, displayName: user.display };
+    // Explicit legacy channel IDs remain valid; an omitted audience never gets a default.
+    const target = typeof input === "string" ? { kind: "channel", channelId: input } : input;
+    if (!target || typeof target !== "object") throw new ApiError(409, "destino_obrigatorio", "Escolha com quem compartilhar. Atualize o app se necessário.");
+    const value = target as Record<string, unknown>;
+    let destination: StreamDestination;
+    if (value.kind === "channel") {
+      const channel = this.directory.destination(textField(value.channelId, 64), uid);
+      destination = { kind: "channel", channelId: channel.channelId };
+    } else if (value.kind === "direct") {
+      const session = this.direct.require(uid, value.sessionId);
+      if (starting && (!this.online(session.a) || !this.online(session.b))) throw new ApiError(409, "amigo_offline", "Seu amigo está offline. Aguarde ele voltar para compartilhar.");
+      destination = { kind: "direct", sessionId: session.id };
+    } else invalidBody();
+    return { destination, displayName: user.display };
   }
 
-  // ---- ao vivo ------------------------------------------------------------------------------
+  async resolvePublished(uid: string, target?: StreamDestination | string) {
+    const previous = this.sql.exec<{ channel_id: string | null; direct_id: string | null }>("SELECT channel_id,direct_id FROM live WHERE user_id = ?", uid).toArray()[0];
+    return this.resolveShare(uid, target ?? (previous?.direct_id ? {kind:"direct",sessionId:previous.direct_id} : previous?.channel_id));
+  }
 
-  /** Chamado pelo StreamDO. `null` encerra. */
-  async setLive(uid: string, info: { since: number; viewers: number; title: string | null; channelId?: string } | null): Promise<boolean> {
+  /** Called by StreamDO with the exact audience of its persisted generation. */
+  async setLive(uid: string, info: { since: number; viewers: number; title: string | null; channelId?: string; destination?: StreamDestination } | null): Promise<boolean> {
     if (!this.find(uid)) return false;
-    const notify = this.directory.peerIds(uid);
     if (info) {
-      let destination: InviteDestination;
+      let target: StreamDestination;
       try {
-        const previous = this.sql.exec<{ channel_id: string | null }>("SELECT channel_id FROM live WHERE user_id = ?", uid).toArray()[0];
-        destination = info.channelId ? this.directory.destination(info.channelId, uid)
-          : previous?.channel_id ? this.directory.destination(previous.channel_id, uid) : this.directory.defaultChannel(uid);
+        const previous = this.sql.exec<{ channel_id: string | null; direct_id: string | null }>("SELECT channel_id,direct_id FROM live WHERE user_id = ?", uid).toArray()[0];
+        const input = info.destination ?? info.channelId ?? (previous?.direct_id ? { kind: "direct", sessionId: previous.direct_id } : previous?.channel_id);
+        target = (await this.resolveShare(uid, input)).destination;
       } catch { return false; }
-      this.sql.exec("INSERT INTO live (user_id,title,since,viewers,updated,channel_id) VALUES (?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET title=excluded.title,since=excluded.since,viewers=excluded.viewers,updated=excluded.updated,channel_id=excluded.channel_id",
-        uid, info.title, info.since, info.viewers, now(), destination.channelId);
+      this.sql.exec("INSERT INTO live (user_id,title,since,viewers,updated,channel_id,direct_id) VALUES (?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET title=excluded.title,since=excluded.since,viewers=excluded.viewers,updated=excluded.updated,channel_id=excluded.channel_id,direct_id=excluded.direct_id",
+        uid, info.title, info.since, info.viewers, now(), target.kind === "channel" ? target.channelId : null, target.kind === "direct" ? target.sessionId : null);
     } else this.sql.exec("DELETE FROM live WHERE user_id = ?", uid);
-    for (const peer of new Set([...this.friendIds(uid), ...notify, uid])) this.push(peer);
+    this.pushWithFriends(uid);
     return true;
   }
 
-  /** Acesso à live exige participação no servidor do canal atual. */
-  async canWatch(viewerId: string, ownerRef: string, channelId?: string): Promise<{ ownerId: string; ownerName: string; viewerName: string }> {
+  async canWatch(viewerId: string, ownerRef: string, input?: StreamDestination | string): Promise<{ ownerId: string; ownerName: string; viewerName: string }> {
     const viewer = this.require(viewerId);
     const owner = /^u_[0-9a-f]{16}$/.test(ownerRef) ? this.find(ownerRef) : this.findByName(normalizeUsername(ownerRef));
     if (!owner) throw new ApiError(404, "usuario_nao_encontrado", "Nenhum usuário com esse nome.");
-    if (owner.id !== viewer.id) {
-      // O StreamDO passa o canal da geração atual para evitar uma troca de canal entre
-      // a autorização HTTP e a assinatura. Uma linha antiga não amplia permissões.
-      const live = this.sql.exec<{ channel_id: string | null }>("SELECT channel_id FROM live WHERE user_id = ?", owner.id).toArray()[0];
-      const currentChannel = channelId ?? live?.channel_id;
-      if (currentChannel) this.directory.destination(currentChannel, viewerId);
-      else if (!this.sql.exec("SELECT mine.server_id FROM members mine JOIN members other ON other.server_id = mine.server_id WHERE mine.user_id = ? AND other.user_id = ? LIMIT 1", viewerId, owner.id).toArray().length) {
-        throw new ApiError(403, "sem_acesso_servidor", "Você precisa participar do servidor para assistir.");
-      }
-    }
+    const live = this.sql.exec<{ channel_id: string | null; direct_id: string | null }>("SELECT channel_id,direct_id FROM live WHERE user_id = ?", owner.id).toArray()[0];
+    const target = typeof input === "string" ? { kind: "channel" as const, channelId: input } : input ?? (live?.direct_id ? { kind: "direct" as const, sessionId: live.direct_id } : live?.channel_id ? { kind: "channel" as const, channelId: live.channel_id } : null);
+    if (target?.kind === "direct") {
+      const session = this.direct.require(viewerId, target.sessionId);
+      if (owner.id !== session.a && owner.id !== session.b) throw new ApiError(403, "sem_permissao", "Esta sessão é privada.");
+    } else if (target?.kind === "channel") {
+      this.directory.destination(target.channelId, viewerId);
+      this.directory.destination(target.channelId, owner.id);
+    } else if (owner.id !== viewerId) throw new ApiError(403, "sem_permissao", "Esta transmissão não está disponível para você.");
     return { ownerId: owner.id, ownerName: owner.display, viewerName: viewer.display };
   }
 
@@ -654,6 +749,8 @@ export class HubDO extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const first = !this.online(uid);
     this.ctx.acceptWebSocket(pair[1], [`u:${uid}`]);
+    this.direct.presence(uid);
+    if (this.direct.needsAlarm()) await this.scheduleDirect();
     this.sql.exec("UPDATE users SET last_seen = ? WHERE id = ?", now(), uid);
     const message = JSON.stringify({ type: "snapshot", ...this.snapshot(uid) });
     pair[1].send(message);
@@ -687,6 +784,8 @@ export class HubDO extends DurableObject<Env> {
     if (!tag) return;
     const uid = tag.slice(2);
     if (this.online(uid)) return;
+    this.direct.presence(uid);
+    if (this.direct.needsAlarm()) void this.scheduleDirect();
     this.sql.exec("UPDATE users SET last_seen = ? WHERE id = ?", now(), uid);
     for (const peer of new Set([...this.friendIds(uid), ...this.directory.peerIds(uid)])) this.push(peer);
   }

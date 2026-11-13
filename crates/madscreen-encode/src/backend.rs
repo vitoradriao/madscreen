@@ -64,6 +64,25 @@ pub fn ffmpeg_h264_level_value(kind: BackendKind, level_idc: u32) -> String {
     }
 }
 
+/// Valor da opção `profile` do FFmpeg; cada encoder tem suas próprias constantes nomeadas.
+/// h264_amf não tem "baseline" (só constrained_baseline/main/high/constrained_high): pedir
+/// "baseline" falhava antes do driver e toda AMD caía para x264 (4–12/nov/2026).
+pub fn ffmpeg_h264_profile_value(
+    kind: BackendKind,
+    profile: crate::config::H264Profile,
+) -> &'static str {
+    use crate::config::H264Profile::*;
+    match (kind, profile) {
+        (BackendKind::Mf, ConstrainedBaseline) => "66",
+        (BackendKind::Mf, Main) => "77",
+        (BackendKind::Mf, High) => "100",
+        (BackendKind::OpenH264 | BackendKind::Amf, ConstrainedBaseline) => "constrained_baseline",
+        (_, ConstrainedBaseline) => "baseline",
+        (_, Main) => "main",
+        (_, High) => "high",
+    }
+}
+
 /// Só o sucesso da criação/teste real encerra a busca; a enumeração do driver não basta.
 pub fn select<T, E>(
     order: impl IntoIterator<Item = BackendKind>,
@@ -82,6 +101,35 @@ pub fn select<T, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ffmpeg_profile_values_exist_in_each_encoder() {
+        use crate::config::H264Profile::*;
+        // Constantes de "profile" no FFmpeg 8.1 (amfenc_h264.c, qsvenc_h264.c, libopenh264enc.c);
+        // libx264 recebe texto livre e o MF recebe o número do profile_idc.
+        let amf = ["main", "high", "constrained_baseline", "constrained_high"];
+        let qsv = ["unknown", "baseline", "main", "high"];
+        let openh264 = ["constrained_baseline", "main", "high"];
+        let x264 = ["baseline", "main", "high"];
+        for profile in [High, Main, ConstrainedBaseline] {
+            for (kind, allowed) in [
+                (BackendKind::Amf, &amf[..]),
+                (BackendKind::Qsv, &qsv[..]),
+                (BackendKind::OpenH264, &openh264[..]),
+                (BackendKind::X264, &x264[..]),
+            ] {
+                let value = ffmpeg_h264_profile_value(kind, profile);
+                assert!(allowed.contains(&value), "{kind:?} {profile:?} -> {value}");
+            }
+        }
+        assert_eq!(
+            ffmpeg_h264_profile_value(BackendKind::Amf, ConstrainedBaseline),
+            "constrained_baseline"
+        );
+        assert_eq!(
+            ffmpeg_h264_profile_value(BackendKind::Mf, ConstrainedBaseline),
+            "66"
+        );
+    }
     #[test]
     fn hardware_failure_continues_to_cpu_and_keeps_diagnostics() {
         let order = candidates(0x1002, None);

@@ -1,6 +1,6 @@
 [package]
 name = "madscreen-app"
-version = "0.1.17"
+version = "0.1.25"
 edition = "2024"
 rust-version = "1.85"
 description = "madscreen: compartilhamento de tela de baixa latencia"

@@ -159,10 +159,16 @@ impl Session {
         let pc = factory
             .create_peer_connection(rtc)
             .map_err(|_| Error::WebRtc("criando PeerConnection"))?;
-        let source = NativeVideoSource::new_encoded(VideoResolution {
+        let resolution = VideoResolution {
             width: config.width,
             height: config.height,
-        });
+        };
+        // Mesmo opt-in do transporte LiveKit: permite medir a sondagem de banda no laboratório local.
+        let source = if std::env::var_os("MADSCREEN_SCREENCAST_SOURCE").is_some() {
+            NativeVideoSource::new_encoded_screencast(resolution)
+        } else {
+            NativeVideoSource::new_encoded(resolution)
+        };
         // Fila zero: caminho direto, blocos de exatamente 10 ms entregues pelo mixer.
         let audio_source = config.audio.then(|| {
             NativeAudioSource::new(
@@ -401,6 +407,8 @@ impl Session {
             audio_mid: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             channel_id: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            direct_session_id: Option<&'a str>,
         }
         let audio_mid = audio_transceiver.as_ref().and_then(|t| t.mid());
         let started: StartResponse = worker
@@ -414,6 +422,7 @@ impl Session {
                     track_name: &config.track_name,
                     audio_mid: audio_mid.as_deref(),
                     channel_id: config.channel_id.as_deref(),
+                    direct_session_id: config.direct_session_id.as_deref(),
                 },
             )
             .await?;
@@ -519,6 +528,7 @@ struct Shared {
     audio_pushed: AtomicU64,
     audio_rejected: AtomicU64,
     sender_history: madscreen_rtc_stats::SenderHistory,
+    max_bitrate_bps: u64,
 }
 
 fn capture(
@@ -694,6 +704,7 @@ impl CloudflarePublisher {
             Ok::<_, Error>((worker, Arc::new(session)))
         })?;
         let shared = Arc::new(Shared {
+            max_bitrate_bps: config.max_bitrate_bps,
             media: Mutex::new(Media {
                 session: Some(session.clone()),
                 keepalive: config.keepalive.then(|| Keepalive {
@@ -747,6 +758,26 @@ impl CloudflarePublisher {
             .as_ref()
             .is_some_and(|s| s.source.take_keyframe_request());
         self.shared.keyframe_needed.swap(false, Ordering::AcqRel) || requested
+    }
+
+    /// Laboratório: alterna o teto do transporte (2x o do encoder, menos 1 bps, e 2x). Teto "subindo"
+    /// com a estimativa abaixo dele faz o ProbeController sondar (probe_controller.cc, SetBitrates).
+    /// Sem start_bitrate, que reiniciaria a estimativa.
+    pub fn request_probe(&self) {
+        let Some(session) = lock(&self.shared.media).session.clone() else {
+            return;
+        };
+        // A sondagem vai até 2x a alocação do encoder (probe_controller.cc), mas nunca acima do teto
+        // do transporte: com o teto igual ao do encoder a rajada media menos que o link (lab 13/nov:
+        // 10,6-13,8 Mbps num enlace de 30). O encoder segue limitado pela própria alocação.
+        let max = self.shared.max_bitrate_bps.saturating_mul(2);
+        for max_bitrate_bps in [max.saturating_sub(1), max] {
+            let _ = session.pc.set_bitrate(BitrateSettings {
+                min_bitrate_bps: None,
+                start_bitrate_bps: None,
+                max_bitrate_bps: Some(max_bitrate_bps),
+            });
+        }
     }
 
     pub fn take_rate_request(&self) -> Option<RateRequest> {

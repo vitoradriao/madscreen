@@ -1,3 +1,4 @@
+import { confirmInvite } from "../shared/invite-ui";
 import { ApiFailure, MadClient, clearPkce, clearInvite, pendingInvite, rememberInvite, type FriendView, type Snapshot } from "../shared/client";
 import { banner, el, svg } from "../shared/dom";
 import { icon } from "../shared/icons";
@@ -88,15 +89,15 @@ async function showWorkspace(): Promise<void> {
   void client.servers().then(next => { if (!receivedSnapshot) update(next); }).catch(error => { if (!disposed) servers.showError(error); });
   const joinPending = async (): Promise<void> => {
     if (disposed || !pendingInvite()) return;
-    alerts.replaceChildren(banner("info", "Entrando no servidor do convite…"));
+    alerts.replaceChildren(banner("info", "Conferindo o convite…"));
     try {
-      const next = await client.completeInvite();
+      const next = await client.completeInvite(confirmInvite);
       if (disposed || !next) return;
       receivedSnapshot = true;
       wanted = null;
       update(next); if (next.destination) servers.select(next.destination);
       history.replaceState(null, "", "/watch");
-      alerts.replaceChildren(banner("ok", `Você entrou em ${next.destination?.serverName ?? "seu servidor"}.`));
+      alerts.replaceChildren(banner("ok", next.inviteStatus === "already_redeemed" ? "Este convite já foi usado por você. Nenhuma relação foi recriada; peça outro link se necessário." : next.destination ? `Você entrou em ${next.destination.serverName}.` : "Convite pessoal aceito. Abra Amigos para compartilhar."));
     } catch (error) {
       if (disposed) return;
       const retry = el("button", { class: "btn sm", type: "button", textContent: "Tentar novamente" });

@@ -423,6 +423,8 @@ pub struct Options {
     /// Canal de vídeo escolhido no servidor.
     #[arg(long, env = "MADSCREEN_CF_CHANNEL")]
     pub cf_channel: Option<String>,
+    #[arg(long, hide = true)]
+    pub cf_direct_session: Option<String>,
     /// Token de dono/publicador do Worker (também aceita server.env).
     #[arg(long, env = "MADSCREEN_CF_TOKEN", hide_env_values = true)]
     pub cf_token: Option<String>,
@@ -473,10 +475,10 @@ impl Options {
         kind: madscreen_encode::backend::BackendKind,
         compat_tuning: bool,
     ) -> bool {
-        // Com qualquer backend o governador reage à banda (encoder acima da estimativa do
-        // WebRTC). Os sinais de CPU/fila só valem nos backends de compatibilidade ou com opt-in.
-        let _ = kind;
-        compat_tuning && !self.no_load_governor
+        // NVENC fica no degrau nativo (como até a 0.1.16): no lab de 10/nov o governador deixou a
+        // live 50 s em 540p30 depois da banda voltar (37 FPS contra 59 sem ele). Opt-in com
+        // --load-governor; nos backends de compatibilidade ele protege CPU e jogo.
+        compat_tuning && !self.no_load_governor && self.governor_cpu_signals(kind)
     }
     pub fn governor_cpu_signals(&self, kind: madscreen_encode::backend::BackendKind) -> bool {
         self.load_governor || madscreen_encode::config::compatibility_backend(kind)
@@ -618,7 +620,7 @@ mod tests {
         let compat = madscreen_encode::backend::BackendKind::X264;
         let nvenc = madscreen_encode::backend::BackendKind::Nvenc;
         assert!(defaults.governor_enabled(compat, true));
-        assert!(defaults.governor_enabled(nvenc, true));
+        assert!(!defaults.governor_enabled(nvenc, true));
         assert!(!defaults.governor_enabled(compat, false));
         assert!(experimental.governor_enabled(nvenc, true));
         assert!(defaults.governor_cpu_signals(compat));

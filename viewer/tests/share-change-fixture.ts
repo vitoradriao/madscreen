@@ -28,6 +28,7 @@ export async function checkShareChanges(check: (condition: unknown, name: string
   const state = (patch: any = {}) => ({ phase: "live", changing: false, session_id: 1, quality_height: 1080, source: "Janela original", source_width: 1920, source_height: 1080, width: 1920, height: 1080, fps: 60, fps_target: 60, bitrate_bps: 1000000, bitrate_target_bps: 14000000, publishing: false, publishing_connected: null, audio_active: 1, message: null, message_is_error: false, encoder: "fixture", level: 42, diagnostic: null, ...patch });
   try {
     view.updateDirectory({ servers: [{ id: "server", name: "Teste", channels: [{ id: "channel", name: "Geral" }] }] } as any);
+    { const audience=view.root.querySelector<HTMLSelectElement>('select[aria-label="Canal da transmissão"]')!; audience.value="channel"; audience.dispatchEvent(new Event("change")); }
     await flush(); view.update(state()); await flush();
     view.root.querySelector<HTMLDetailsElement>(".share-quality")!.open = true;
     check(!radio("720p").disabled && !button("Trocar janela ou tela").disabled, "Qualidade e troca de fonte ficam disponíveis durante a live");

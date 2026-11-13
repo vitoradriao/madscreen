@@ -29,6 +29,7 @@ export async function checkShareResolution(check: (condition: unknown, name: str
       const view = createShareView(); document.body.append(view.root);
       try {
         view.updateDirectory({ servers: [{ id: "server", name: "Teste", channels: [{ id: "channel", name: "Geral" }] }] } as any);
+    { const audience=view.root.querySelector<HTMLSelectElement>('select[aria-label="Canal da transmissão"]')!; audience.value="channel"; audience.dispatchEvent(new Event("change")); }
         await flush();
         [...view.root.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Escolher janela ou tela")!.click();
         await flush();

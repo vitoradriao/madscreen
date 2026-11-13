@@ -606,6 +606,7 @@ impl NvencEncoder {
         };
         output.timing = pending.timing;
         output.index = pending.index;
+        output.qp = Some(lock.frameAvgQP);
         if output.kind == FrameKind::Key {
             crate::bitstream::validate_key_headers(self.config.codec, &output.data)?;
         }

@@ -1,9 +1,10 @@
 // Componentes de interface compartilhados (app Tauri e viewer web): entrar, amigos e assistir.
-import { ApiFailure, clearPkce, savedPkce, pendingInvite, rememberInvite, WatchSession, type FriendView, type MadClient, type Snapshot, type UserView, type WatchState, type WatchStats } from "./client";
+import { ApiFailure, clearPkce, savedPkce, pendingInvite, rememberInvite, WatchSession, type FriendView, type MadClient, type Snapshot, type UserView, type WatchState, type WatchStats, type VideoQuality } from "./client";
 import { ago, banner, copyText, el, initials, segmented, svg } from "./dom";
 import { icon } from "./icons";
 import { diagnosticGuidance } from "./diagnostic-guidance";
 import { videoTheme } from "./theme";
+import { confirmInvite, createInviteManager } from "./invite-ui";
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -39,8 +40,8 @@ function field(label: string, input: HTMLElement): HTMLElement {
 // ---- Entrar -----------------------------------------------------------------------------------
 
 export interface LoginOptions {
-  /** Abre a URL no navegador do sistema (app) ou navega (web). */
-  openUrl(url: string): void;
+  /** Abre a URL no navegador do sistema (app) ou navega (web). `false` indica que não abriu. */
+  openUrl(url: string): void | boolean | Promise<boolean | void>;
   onLoggedIn(recoveryKey?: string): void;
   invite?: string | undefined;
   signal?: AbortSignal;
@@ -71,11 +72,10 @@ export function createLogin(client: MadClient, options: LoginOptions): HTMLEleme
     const { url, verifier } = await client.beginOAuth(provider, code.value);
     if (controller.signal.aborted || abort !== controller) return;
     localStorage.setItem("ms.pkce", verifier);
-    options.openUrl(url);
-    await resume(verifier, controller);
+    await resume(verifier, controller, url);
   }
 
-  async function resume(verifier: string, controller = new AbortController()): Promise<void> {
+  async function resume(verifier: string, controller = new AbortController(), url?: string): Promise<void> {
     if (options.signal?.aborted) return;
     if (abort !== controller) abort?.abort();
     abort = controller;
@@ -86,7 +86,33 @@ export function createLogin(client: MadClient, options: LoginOptions): HTMLEleme
       clearPkce();
       alerts.replaceChildren();
     });
-    alerts.replaceChildren(el("div", { class: "banner info row between", role: "status" }, "Autorize o acesso na janela do navegador que abriu…", cancel));
+    const message = el("span", { class: "grow", textContent: "Autorize o acesso na janela do navegador que abriu…" });
+    const actions = el("div", { class: "row oauth-wait-actions" });
+    if (url) {
+      const open = el("button", { class: "btn ghost sm", type: "button" }, svg(icon("link", "sm")), "Abrir no navegador");
+      const copy = el("button", { class: "btn ghost sm", type: "button" }, svg(icon("copy", "sm")), "Copiar link");
+      let copyTimer = 0;
+      const launch = async (): Promise<void> => {
+        let opened: boolean | void = undefined;
+        try { opened = await options.openUrl(url); } catch { opened = false; }
+        if (abort !== controller) return;
+        message.textContent = opened === false
+          ? "Não foi possível abrir o navegador. Copie o link e abra no navegador para autorizar."
+          : "Autorize o acesso na janela do navegador que abriu…";
+      };
+      open.addEventListener("click", () => { void launch(); });
+      copy.addEventListener("click", () => {
+        void copyText(url).then((ok) => {
+          copy.replaceChildren(svg(icon(ok ? "check" : "copy", "sm")), ok ? "Copiado" : "Não foi possível copiar");
+          window.clearTimeout(copyTimer);
+          copyTimer = window.setTimeout(() => copy.replaceChildren(svg(icon("copy", "sm")), "Copiar link"), 2000);
+        });
+      });
+      actions.append(open, copy);
+      void launch();
+    }
+    actions.append(cancel);
+    alerts.replaceChildren(el("div", { class: "banner info oauth-wait", role: "status" }, message, actions));
     try {
       await client.awaitOAuth(verifier, controller.signal);
       if (controller.signal.aborted || options.signal?.aborted || abort !== controller) return;
@@ -107,7 +133,7 @@ export function createLogin(client: MadClient, options: LoginOptions): HTMLEleme
   const code = el("input", { class: "input", placeholder: "XXXX-XXXX ou link do convite", autocomplete: "off", maxLength: 512, spellcheck: false, value: options.invite ?? pendingInvite() ?? "" });
   const create = el("button", { class: "btn primary block", type: "submit", textContent: "Criar conta" });
   const codeField = field("Convite de um amigo (opcional)", code);
-  const idleDestination = "Cole o código ou o link para entrar direto no servidor de quem convidou.";
+  const idleDestination = "Cole um convite pessoal para adicionar um amigo ou um convite de servidor para participar dele.";
   const destination = el("p", { class: "small muted", role: "status" });
   describe(code, destination);
   const inviteBlock = el("div", { class: "auth-invite stack tight" }, codeField, destination);
@@ -179,8 +205,13 @@ export function createLogin(client: MadClient, options: LoginOptions): HTMLEleme
   };
   fallback.addEventListener("toggle", arrange);
 
-  registerForm.addEventListener("submit", (event) => {
+  registerForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (code.value.trim()) {
+      try { if (!await confirmInvite(await client.previewInvite(code.value))) return; }
+      catch (error) { say("error", errorText(error)); return; }
+    }
+    if (options.signal?.aborted) return;
     abort?.abort();
     clearPkce();
     create.disabled = true;
@@ -267,16 +298,23 @@ export interface FriendsPanel {
   dispose(): void;
 }
 
-export function createFriends(client: MadClient, handlers: { onWatch(friend: FriendView): void }): FriendsPanel {
+export function createFriends(client: MadClient, handlers: { onWatch(friend: FriendView): void; onShare?(friend: FriendView): void; onSnapshot?(snapshot: Snapshot): void }): FriendsPanel {
   const alerts = el("div", { class: "stack tight" });
   const say = (kind: "error" | "info" | "ok", text: string): void => alerts.replaceChildren(banner(kind, text));
   const lists = el("div", { class: "stack loose" });
-  const status = el("span", { class: "small faint", textContent: "Conectando…" });
+  const status = el("span", { class: "small faint friends-status", role: "status", textContent: "Conectando…" });
   let current: Snapshot | null = null;
   let fingerprint = "";
   let disposed = false;
   let ageTimer: ReturnType<typeof setInterval> | undefined;
   const liveTimes = new Map<HTMLElement, number>();
+  let selectedId = "";
+  let filter = "all";
+  const search = el("input", { class: "input", type: "search", placeholder: "Buscar amigo", ariaLabel: "Buscar amigo" });
+  search.addEventListener("input", () => { fingerprint = ""; if (current) update(current); });
+  const filters = segmented<"all" | "online" | "pending">([{ value: "all", label: "Todos" }, { value: "online", label: "Online" }, { value: "pending", label: "Pendentes" }], "all", value => { filter = value; fingerprint = ""; if (current) update(current); });
+  const profile = el("section", { class: "card stack", ariaLabel: "Amigo selecionado" });
+  const apply = (next: Snapshot): void => { update(next); handlers.onSnapshot?.(next); };
 
   function refreshAges(): void {
     if (document.hidden || root.closest("[hidden]")) return;
@@ -286,26 +324,29 @@ export function createFriends(client: MadClient, handlers: { onWatch(friend: Fri
     }
   }
 
-  const usernameInput = el("input", { class: "input", placeholder: "Nome de usuário", spellcheck: false, maxLength: 21 });
+  const usernameInput = el("input", { class: "input", id: nextFieldId(), placeholder: "Nome de usuário", spellcheck: false, maxLength: 21, required: true });
   const addButton = el("button", { class: "btn", type: "submit" }, svg(icon("userPlus", "sm")), "Adicionar");
-  const addForm = el("form", { class: "row nowrap" }, el("div", { class: "grow" }, usernameInput), addButton);
+  const addForm = el("form", { class: "friends-add" },
+    el("label", { htmlFor: usernameInput.id, class: "friends-label", textContent: "Adicionar amigo" }),
+    el("p", { class: "small muted", textContent: "Envie um pedido pelo nome de usuário." }),
+    el("div", { class: "friends-add-controls" }, usernameInput, addButton));
   addForm.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!usernameInput.value.trim()) return;
     addButton.disabled = true;
     client.requestFriend(usernameInput.value)
-      .then((snapshot) => { usernameInput.value = ""; update(snapshot); say("ok", "Pedido enviado."); })
+      .then((snapshot) => { usernameInput.value = ""; apply(snapshot); say("ok", "Pedido enviado."); })
       .catch((error: unknown) => say("error", errorText(error)))
       .finally(() => { addButton.disabled = false; });
   });
 
-  const inviteButton = el("button", { class: "btn block", type: "button" }, svg(icon("link", "sm")), "Copiar link de convite");
+  const inviteButton = el("button", { class: "btn primary", type: "button" }, svg(icon("link", "sm")), "Copiar link de convite");
   inviteButton.addEventListener("click", () => {
     inviteButton.disabled = true;
     client.createInvite()
       .then(async (invite) => {
         const copied = await copyText(invite.link);
-        say("ok", copied ? `Link copiado (vale por 7 dias, até ${invite.maxUses} pessoas). Código: ${invite.code}` : `Envie este link: ${invite.link}`);
+        say("ok", copied ? `Convite pessoal copiado: um destinatário, sete dias. Código: ${invite.code}` : `Envie este convite pessoal: ${invite.link}`);
       })
       .catch((error: unknown) => say("error", errorText(error)))
       .finally(() => { inviteButton.disabled = false; });
@@ -319,16 +360,26 @@ export function createFriends(client: MadClient, handlers: { onWatch(friend: Fri
     const sub = live
       ? el("div", { class: "sub" }, `@${friend.username} · `, age, ` · ${live.viewers} assistindo`)
       : el("div", { class: "sub", textContent: `@${friend.username} · ${friend.online ? "online" : "offline"}` });
+    if (live?.destination?.kind === "direct") sub.prepend(`${friend.displayName} está compartilhando com você · `);
     const row = el("div", { class: "list-row" }, avatar(friend, friend.online), el("div", { class: "grow" }, name, sub));
+    const choose = el("button", { class: "btn ghost sm", type: "button", textContent: "Abrir", ariaLabel: `Abrir perfil de ${friend.displayName}` });
+    choose.addEventListener("click", () => { selectedId = friend.id; fingerprint = ""; if (current) update(current); });
+    row.append(choose);
     if (live) {
       const watch = el("button", { class: "btn primary sm", type: "button" }, svg(icon("play", "sm")), "Assistir");
       watch.addEventListener("click", () => handlers.onWatch(friend));
       row.append(watch);
+      const session = current?.directSessions?.find(item => item.peerId === friend.id);
+      if (live.destination?.kind === "direct" && session && !session.declined) {
+        const decline = el("button", { class: "btn sm", textContent: "Agora não", type: "button" });
+        decline.addEventListener("click", () => { void client.declineDirect(session.id).then(() => client.friends()).then(apply).catch(error => say("error", errorText(error))); });
+        row.append(decline);
+      }
     }
     const remove = el("button", { class: "btn ghost sm row-remove", type: "button", title: "Remover amigo", ariaLabel: `Remover ${friend.displayName}` }, svg(icon("x", "sm")));
     remove.addEventListener("click", () => {
       if (!confirm(`Remover ${friend.displayName} dos amigos?`)) return;
-      client.removeFriend(friend.id).then(update).catch((error: unknown) => say("error", errorText(error)));
+      client.removeFriend(friend.id).then(apply).catch((error: unknown) => say("error", errorText(error)));
     });
     row.append(remove);
     return row;
@@ -339,12 +390,12 @@ export function createFriends(client: MadClient, handlers: { onWatch(friend: Fri
     if (incoming) {
       const accept = el("button", { class: "btn primary sm", type: "button", textContent: "Aceitar" });
       const decline = el("button", { class: "btn sm", type: "button", textContent: "Recusar" });
-      accept.addEventListener("click", () => { client.acceptFriend(user.id).then(update).catch((e: unknown) => say("error", errorText(e))); });
-      decline.addEventListener("click", () => { client.declineFriend(user.id).then(update).catch((e: unknown) => say("error", errorText(e))); });
+      accept.addEventListener("click", () => { client.acceptFriend(user.id).then(apply).catch((e: unknown) => say("error", errorText(e))); });
+      decline.addEventListener("click", () => { client.declineFriend(user.id).then(apply).catch((e: unknown) => say("error", errorText(e))); });
       row.append(decline, accept);
     } else {
       const cancel = el("button", { class: "btn ghost sm", type: "button", textContent: "Cancelar" });
-      cancel.addEventListener("click", () => { client.removeFriend(user.id).then(update).catch((e: unknown) => say("error", errorText(e))); });
+      cancel.addEventListener("click", () => { client.removeFriend(user.id).then(apply).catch((e: unknown) => say("error", errorText(e))); });
       row.append(cancel);
     }
     return row;
@@ -363,24 +414,50 @@ export function createFriends(client: MadClient, handlers: { onWatch(friend: Fri
   function update(snapshot: Snapshot): void {
     if (disposed) return;
     current = snapshot;
-    const nextFingerprint = JSON.stringify([snapshot.friends, snapshot.incoming, snapshot.outgoing]);
+    const nextFingerprint = JSON.stringify([snapshot.friends, snapshot.incoming, snapshot.outgoing, snapshot.directSessions, selectedId, filter, search.value]);
     if (fingerprint === nextFingerprint) {
       refreshAges();
       return;
     }
     fingerprint = nextFingerprint;
     liveTimes.clear();
-    const live = snapshot.friends.filter((friend) => friend.live);
-    const online = snapshot.friends.filter((friend) => !friend.live && friend.online);
-    const offline = snapshot.friends.filter((friend) => !friend.live && !friend.online);
+    const matches = snapshot.friends.filter(friend => `${friend.displayName} ${friend.username}`.toLowerCase().includes(search.value.toLowerCase()));
+    const live = matches.filter(friend => friend.live && filter !== "pending");
+    const online = matches.filter(friend => !friend.live && friend.online && filter !== "pending");
+    const offline = matches.filter(friend => !friend.live && !friend.online && filter === "all");
     const blocks = [
-      section("Pedidos recebidos", snapshot.incoming.length, snapshot.incoming.map((user) => requestRow(user, true))),
+      filter !== "online" ? section("Pedidos recebidos", snapshot.incoming.length, snapshot.incoming.map((user) => requestRow(user, true))) : null,
       section("Ao vivo agora", live.length, live.map(friendRow)),
       section("Online", online.length, online.map(friendRow), snapshot.friends.length ? undefined : "Você ainda não tem amigos. Adicione por nome de usuário ou envie um link de convite."),
       section("Offline", offline.length, offline.map(friendRow)),
-      section("Pedidos enviados", snapshot.outgoing.length, snapshot.outgoing.map((user) => requestRow(user, false))),
+      filter !== "online" ? section("Pedidos enviados", snapshot.outgoing.length, snapshot.outgoing.map((user) => requestRow(user, false))) : null,
     ];
-    lists.replaceChildren(...blocks.filter((block): block is HTMLElement => block !== null));
+    const visibleBlocks = blocks.filter((block): block is HTMLElement => block !== null);
+    if (!snapshot.friends.length && !snapshot.incoming.length && !snapshot.outgoing.length) {
+      lists.replaceChildren(el("div", { class: "friends-empty" }, svg(icon("users")),
+        el("h2", { textContent: "Nenhum amigo adicionado" }),
+        el("p", { class: "muted", textContent: "Adicione pelo nome de usuário ou envie um link de convite." })));
+    } else if (!visibleBlocks.length) {
+      lists.replaceChildren(el("div", { class: "friends-empty" }, svg(icon("users")),
+        el("h2", { textContent: search.value ? "Nenhum amigo encontrado" : filter === "pending" ? "Nenhum pedido pendente" : "Nenhum amigo online" }),
+        el("p", { class: "muted", textContent: search.value ? "Tente buscar por outro nome." : "Escolha Todos para ver sua lista de amigos." })));
+    } else lists.replaceChildren(...visibleBlocks);
+    const selected = snapshot.friends.find(friend => friend.id === (snapshot.inviter ?? selectedId)) ?? snapshot.friends[0];
+    profile.replaceChildren();
+    profile.hidden = !selected;
+    if (selected) {
+      selectedId = selected.id;
+      const session = snapshot.directSessions?.find(item => item.peerId === selected.id);
+      const share = handlers.onShare ? el("button", { class: "btn primary", type: "button", textContent: `Compartilhar com ${selected.displayName}`, disabled: !selected.online || !!session?.reconnecting }) : null;
+      share?.addEventListener("click", () => handlers.onShare?.(selected));
+      profile.append(avatar(selected, selected.online), el("h2", { textContent: selected.displayName }), el("p", { textContent: session?.reconnecting ? "Reconectando… A sessão encerra após 30 segundos sem retorno." : selected.online ? "Online" : "Offline · aguarde seu amigo voltar para compartilhar." }), el("p", { class: "small muted", textContent: "Compartilhamento privado. Visível somente para vocês." }));
+      if (share) profile.append(share);
+      if (session) {
+        const end = el("button", { class: "btn", type: "button", textContent: "Encerrar sessão privada" });
+        end.addEventListener("click", () => { void client.endDirect(session.id).then(() => client.friends()).then(apply).catch(error => say("error", errorText(error))); });
+        profile.append(end);
+      }
+    }
     if (live.length && ageTimer === undefined) ageTimer = setInterval(refreshAges, 30_000);
     if (!live.length) {
       clearInterval(ageTimer);
@@ -388,13 +465,20 @@ export function createFriends(client: MadClient, handlers: { onWatch(friend: Fri
     }
   }
 
+  const inviteManager = createInviteManager(client);
+  inviteManager.querySelector("summary")?.prepend(svg(icon("chevronDown", "sm")));
   const root = el(
     "div",
-    { class: "stack loose" },
-    el("div", { class: "row between" }, el("h2", {}, "Amigos"), status),
-    el("div", { class: "stack tight" }, addForm, inviteButton),
+    { class: "friends-panel" },
+    el("div", { class: "friends-panel-status" }, status),
+    el("div", { class: "friends-actions" }, addForm,
+      el("section", { class: "friends-invite" },
+        el("h2", { class: "friends-label", textContent: "Convite pessoal" }),
+        el("p", { class: "small muted", textContent: "Envie um link para adicionar alguém aos amigos." }),
+        inviteButton, el("div", { class: "friends-invite-manager" }, inviteManager))),
+    el("div", { class: "friends-toolbar" }, filters.root, el("div", { class: "friends-search" }, svg(icon("search", "sm")), search)),
     alerts,
-    lists,
+    el("div", { class: "friends-space" }, lists, profile),
   );
   return {
     root,
@@ -418,7 +502,7 @@ export interface WatchPanel {
   getDiagnostics(): ReturnType<WatchSession["getDiagnostics"]> | null;
   root: HTMLElement;
   setBackgroundMuted(muted: boolean): void;
-  watch(friend: { username: string; displayName: string }): void;
+  watch(friend: Pick<FriendView, "username" | "displayName"> & Partial<Pick<FriendView, "live">>): void;
   stop(): void;
   dispose(): void;
 }
@@ -473,6 +557,13 @@ function loadAudioPref(key: string): AudioPref {
 }
 
 /** O navegador só libera som automático depois de uma interação do usuário com a página. */
+/** Linha de qualidade dos detalhes técnicos; null aparece como "indisponível", nunca 0. */
+export function formatVideoQuality(q: VideoQuality | undefined): string {
+  if (!q || q.windowSeconds === null) return "Qualidade: aguardando amostras.";
+  const n = (value: number | null, digits = 1) => value === null ? "indisponível" : value.toFixed(digits).replace(".", ",");
+  return `Qualidade (últimos ${Math.round(q.windowSeconds)} s): QP médio ${q.qpAverage === null ? "indisponível (o decodificador por hardware não informa; veja o diagnóstico de quem transmite)" : n(q.qpAverage)} · keyframes ${n(q.keyframesPerMinute)}/min · PLI ${n(q.pliPerMinute)}/min · NACK ${n(q.nackPerMinute)}/min · ${q.codec ?? "codec indisponível"} · decoder ${q.decoder ?? "indisponível"}`;
+}
+
 function soundAllowed(): boolean {
   return navigator.userActivation?.hasBeenActive ?? true;
 }
@@ -496,8 +587,9 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
   video.disablePictureInPicture = true;
   const message = el("div", { class: "placeholder" }, svg(icon("monitor")), el("span", { textContent: STATE_TEXT.stopped }));
   const hud = el("div", { class: "hud", hidden: true });
+  const qualityLine = el("p", { class: "small mono" });
   const playerStats = el("span", { class: "player-stats mono", hidden: true });
-  const fullscreen = el("button", { class: "btn sm", type: "button", title: "Tela cheia" }, svg(icon("fullscreen", "sm")));
+  const fullscreen = el("button", { class: "btn player-fullscreen", type: "button" });
   const diagnostic = el("button", { class: "btn sm", type: "button", textContent: "Copiar diagnóstico", title: "Copie logo após uma travadinha para registrar os últimos segundos.", disabled: true });
   const diagnosticHelp = el("p", { class: "small muted" }, "Para pedir ajuda, informe a versão do seu app e peça também o diagnóstico de quem transmite. O relatório contém contadores e tempos, sem imagem ou som.");
   const stateDetail = el("p", { class: "small muted", hidden: true });
@@ -518,11 +610,11 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
     el("div", { class: "stack tight mt" }, stateDetail,
       el("p", { class: "small" }, "Use o volume para ajustar o som, M para silenciar e F para tela cheia. Se houver travadas ou ruído, copie o diagnóstico e envie a quem transmite."),
       diagnosticHelp,
-      el("details", { class: "watch-technical" }, el("summary", {}, "Detalhes técnicos"), hud,
+      el("details", { class: "watch-technical" }, el("summary", {}, "Detalhes técnicos"), hud, qualityLine,
       el("label", { class: "row" }, explain, "Mostrar observações do último intervalo"),
       el("p", { class: "small muted" }, "Retrato ao abrir a ajuda ou escolher Atualizar observações; não acompanha a transmissão continuamente."), guidance, refresh)),
   );
-  const info = el("button", { class: "btn sm", type: "button", textContent: "Ajuda" });
+  const info = el("button", { class: "btn", type: "button", title: "Ajuda" }, svg(icon("help")), el("span", { class: "control-label" }, "Ajuda"));
   info.setAttribute("aria-expanded", "false");
   const syncHelp = (): void => {
     info.setAttribute("aria-expanded", String(diagnostics.open));
@@ -559,10 +651,21 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
   let diagnosticReset: ReturnType<typeof setTimeout> | undefined;
   const volume = el("input", { class: "volume", type: "range", min: "0", max: "100", step: "1", value: String(Math.round(audioPref.volume * 100)) });
   volume.setAttribute("aria-label", "Volume");
-  const mute = el("button", { class: "btn sm", type: "button" }, svg(icon("volume", "sm")));
+  const level = el("span", { class: "volume-value", ariaHidden: "true" });
+  const mute = el("button", { class: "btn", type: "button" });
   const unlock = el("button", { class: "audio-unlock", type: "button", hidden: true }, svg(icon("volumeOff", "sm")), "Clique para ativar o som");
-  const stage = el("div", { class: "stage" }, video, message, unlock, el("div", { class: "controls" }, el("div", { class: "audio-ctl" }, volume, mute), playerStats, info, fullscreen));
-  stage.addEventListener("fullscreenchange", syncHelp);
+  const popout = el("button", { class: "btn", type: "button", title: "Mini-player", ariaLabel: "Mini-player", hidden: !options.popout }, svg(icon("miniPlayer")), el("span", { class: "control-label" }, "Mini-player"));
+  const stage = el("div", { class: "stage" }, video, message, unlock, el("div", { class: "controls" },
+    el("div", { class: "audio-ctl" }, mute, volume, level), playerStats, info, popout, fullscreen));
+  const syncFullscreen = (): void => {
+    const active = stage.ownerDocument.fullscreenElement === stage;
+    const label = active ? "Sair da tela cheia" : "Tela cheia";
+    fullscreen.title = `${label} (F)`;
+    fullscreen.ariaLabel = `${label}: ${displayName}`;
+    fullscreen.replaceChildren(svg(icon(active ? "exitFullscreen" : "fullscreen")), el("span", { class: "control-label" }, label));
+  };
+  syncFullscreen();
+  stage.addEventListener("fullscreenchange", () => { syncFullscreen(); syncHelp(); });
   const actionError = el("div", { class: "watch-action-error", role: "alert", hidden: true });
   stage.append(actionError);
   stage.dataset.theme = videoTheme();
@@ -570,7 +673,6 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
   const badge = el("span", { class: "badge", hidden: true });
   const playerTop = el("div", { class: "player-top" }, el("div", { class: "who" }, title, badge, audioStatus));
   stage.append(playerTop);
-  const popout = el("button", { class: "btn sm", type: "button", textContent: "Mini-player", hidden: !options.popout });
   popout.setAttribute("data-main-window-only", "");
   info.setAttribute("data-main-window-only", "");
   popout.addEventListener("click", async () => {
@@ -589,7 +691,6 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
       actionError.hidden = false;
     } finally { popout.disabled = false; }
   });
-  if (options.popout) stage.querySelector(".controls")?.append(popout);
   const selfNotice = banner("info", "Sua própria transmissão fica sempre sem som para evitar eco.");
   selfNotice.hidden = true;
 
@@ -611,7 +712,7 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
     // Não remova o alvo do pointerdown antes de o navegador entregar o click.
     if (mute.dataset.soundIcon !== soundIcon) {
       mute.dataset.soundIcon = soundIcon;
-      mute.replaceChildren(svg(icon(soundIcon, "sm")));
+      mute.replaceChildren(svg(icon(soundIcon)));
     }
     mute.disabled = !audioPresent || selfView;
     volume.disabled = !audioPresent || selfView;
@@ -619,6 +720,10 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
     mute.title = label;
     mute.setAttribute("aria-label", `${label}: ${displayName}`);
     volume.value = String(Math.round(audioPref.volume * 100));
+    const percent = `${volume.value}%`;
+    volume.style.setProperty("--volume-level", percent);
+    volume.setAttribute("aria-valuetext", percent);
+    level.textContent = volume.disabled ? "—" : percent;
     const attempt = ++playAttempt;
     if (!video.muted && video.srcObject) {
       // Desmutar sem gesto pode pausar o vídeo: volta a mudo em vez de travar a imagem.
@@ -678,7 +783,9 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
     else if (document.fullscreenElement) void document.exitFullscreen();
     else void stage.requestFullscreen().catch(() => undefined);
   });
-  stage.addEventListener("dblclick", () => fullscreen.click());
+  stage.addEventListener("dblclick", event => {
+    if (event.target === stage || event.target === video || message.contains(event.target as Node)) fullscreen.click();
+  });
   // Tecla F alterna a tela cheia (fora de campos de texto), como nos outros viewers.
   const onKey = (event: KeyboardEvent): void => {
     if (options.keyboardActive && !options.keyboardActive()) return;
@@ -748,7 +855,7 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
       displayName = friend.displayName;
       panel.root.setAttribute("aria-label", `Transmissão de ${displayName}`);
       volume.setAttribute("aria-label", `Volume: ${displayName}`);
-      fullscreen.setAttribute("aria-label", `Tela cheia: ${displayName}`);
+      syncFullscreen();
       leave.setAttribute("aria-label", `Sair da transmissão: ${displayName}`);
       diagnostic.setAttribute("aria-label", `Copiar diagnóstico: ${displayName}`);
       info.setAttribute("aria-label", `Ajuda: ${displayName}`);
@@ -771,9 +878,10 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
         onStats: (stats) => {
           hud.textContent = formatStats(stats);
           playerStats.textContent = hud.textContent;
+          if (diagnostics.open) qualityLine.textContent = formatVideoQuality(session?.getQuality());
           hud.title = `Último intervalo: perda ${stats.lossPct?.toFixed(2) ?? "—"}% · buffer de vídeo ${stats.jitterBufferMs?.toFixed(1) ?? "—"} ms`;
         },
-      }, { audio: !selfView });
+      }, { audio: !selfView, ...(friend.live?.destination ? { destination: friend.live.destination } : {}) });
       session.start();
     },
     stop() {
@@ -785,6 +893,7 @@ export function createWatchPanel(client: MadClient, options: WatchOptions = {}):
       detached?.close(); detached = null;
       clearTimeout(diagnosticReset);
       diagnostic.textContent = "Copiar diagnóstico";
+      qualityLine.textContent = "";
       session?.stop();
       session = null;
       audioPresent = false;
@@ -818,7 +927,7 @@ export interface WatchLayout {
   root: HTMLElement;
   readonly count: number;
   actionLabel(username: string): string;
-  watch(friend: Pick<FriendView, "username" | "displayName">): void;
+  watch(friend: Pick<FriendView, "username" | "displayName"> & Partial<Pick<FriendView, "live">>): void;
   stop(): void;
   dispose(): void;
 }
@@ -837,7 +946,7 @@ export function createWatchLayout(client: MadClient, options: WatchOptions & { o
   const controls = el("div", { class: "watch-toolbar" });
   const selection = el("div", { class: "row wrap watch-selection" });
   const helpHost = el("aside", { class: "watch-help-host", hidden: true, ariaLabel: "Ajuda da transmissão" });
-  const add = el("button", { class: "btn sm", type: "button", textContent: "Adicionar transmissão" });
+  const add = el("button", { class: "btn sm", type: "button" }, svg(icon("plus", "sm")), "Adicionar transmissão");
   const swap = el("button", { class: "btn sm", type: "button", textContent: "Trocar destaque", title: "Trocar destaque (D)" });
   const equal = el("button", { class: "btn sm", type: "button", textContent: "Lado a lado" });
   const audioMode = el("input", { type: "checkbox" });

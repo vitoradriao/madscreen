@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Room, RoomEvent, publication, track } from "./fake-sdk.mjs";
 import { LiveKitViewer } from "../shared/livekit.ts";
-import { WatchSession, videoRttMs } from "../shared/client.ts";
+import { WatchSession, videoRttMs, videoQuality } from "../shared/client.ts";
 import "./receiver-latency.test.mjs";
 import "./ux.test.mjs";
 import "./share-history.test.mjs";
@@ -62,6 +62,17 @@ test("diagnóstico conserva RTT de 200 e 60 ms junto aos quadros, sem atribuir c
     const json=JSON.stringify(diagnostics);
     for(const key of ["owner","test-token","sessionId","candidate-pair","transportId"])assert(!json.includes(key));
     diagnostics.samples[0].rttMs=999;assert.equal(session.getDiagnostics().samples[0].rttMs,20);
+  });
+});
+
+test("diagnóstico copiável traz QP, keyframes, codec e decoder do inbound-rtp",async()=>{
+  await withSamples(async({sample,session})=>{
+    const codec=[["c1",{type:"codec",mimeType:"video/H264",sdpFmtpLine:"level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"}]];
+    for(let i=0;i<=10;i++)await sample(i*1000,{codecId:"c1",framesDecoded:60+i*60,qpSum:i*60*30,keyFramesDecoded:1+(i>5?1:0),pliCount:i>5?1:0,decoderImplementation:"FFmpeg"},codec);
+    const quality=JSON.parse(JSON.stringify(session.getDiagnostics())).quality;
+    assert.equal(quality.qpAverage,30);assert.equal(quality.codec,"H264 42e01f");assert.equal(quality.decoder,"FFmpeg");
+    assert.equal(quality.keyframesPerMinute,6);assert.equal(quality.pliPerMinute,6);
+    assert.deepEqual(session.getQuality(),quality);
   });
 });
 
@@ -481,4 +492,21 @@ test("lacuna longa preserva somente dois minutos e reset do audio com mesmo id i
     assert.equal(report.audioHistory.length,1);
     assert.equal(report.samples.at(-1).sampleGapMs,129750);
   });
+});
+
+test("qualidade do vídeo: QP por diferença, eventos por minuto e ausentes como null", () => {
+  const s = (atMs, framesDecoded, qpSum, extra = {}) => ({ atMs, segment: 1, framesDecoded, qpSum, keyFramesDecoded: 2, pliCount: 0, nackCount: 0,
+    codec: "H264 42e01f", decoderImplementation: null, ...extra });
+  assert.deepEqual(videoQuality([]), { windowSeconds: null, qpAverage: null, keyframesPerMinute: null, pliPerMinute: null, nackPerMinute: null, codec: null, decoder: null });
+  const q = videoQuality([s(0, 0, 0), s(10_000, 600, 1000), s(30_000, 1800, 9999, { keyFramesDecoded: 4, pliCount: 1, nackCount: 10 }), s(70_000, 3600, 50_000, { keyFramesDecoded: 5, pliCount: 2, nackCount: 30 })]);
+  // Janela de 60 s: começa na amostra de 10 s.
+  assert.equal(q.windowSeconds, 60);
+  assert.equal(q.qpAverage, (50_000 - 1000) / 3000);
+  assert.deepEqual([q.keyframesPerMinute, q.pliPerMinute, q.nackPerMinute, q.codec, q.decoder], [3, 2, 30, "H264 42e01f", null]);
+  // framesDecoded sem avanço, qpSum que volta ou ausente: QP indisponível, nunca 0.
+  assert.equal(videoQuality([s(0, 100, 500), s(1000, 100, 500)]).qpAverage, null);
+  assert.equal(videoQuality([s(0, 100, 500), s(1000, 160, 400)]).qpAverage, null);
+  assert.equal(videoQuality([s(0, 100, null), s(1000, 160, null)]).qpAverage, null);
+  // Segmento novo (contadores reiniciados) não mistura com o anterior.
+  assert.equal(videoQuality([s(0, 900, 9000), s(1000, 10, 100, { segment: 2 })]).windowSeconds, null);
 });

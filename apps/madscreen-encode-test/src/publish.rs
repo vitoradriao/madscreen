@@ -44,12 +44,128 @@ pub struct Live {
     rate_busy: u64,
     wanted_bps: Option<u32>,
     last_request_bps: u64,
+    /// O degrau do governador mudou o FPS e o encoder ainda orça a taxa pelo anterior.
+    fps_dirty: bool,
     diagnostic: Option<DiagnosticWindow>,
     governor: Option<LoadGovernor>,
     governor_wait_max_ms: f64,
     governor_at_ms: u64,
     /// Bytes de AU desde a última janela do governador (sinal de banda).
     governor_bytes: u64,
+    /// Pede sondagem quando a estimativa despenca; `MADSCREEN_PROBE_NUDGE=0` desliga.
+    probe_nudge: Option<ProbeNudge>,
+    /// Laboratório (MADSCREEN_LAB_PROBE_AT_S): uma sondagem forçada, para exercitar o caminho do
+    /// transporte numa sala real sem precisar derrubar a estimativa.
+    forced_probe_at: Option<std::time::Instant>,
+}
+
+/// Depois de um pico de atraso o GCC sobe só ~50 kbps/s (aumento aditivo) e não sonda sozinho fora
+/// de ALR. Numa queda brusca (pedido abaixo de 70% do maior dos últimos 5 s) pede no máximo duas
+/// sondagens, em +3 s e +8 s (a imediata é recusada enquanto o atraso sobe). Volta a 70% do nível
+/// anterior ou esgota as tentativas: só uma nova queda brusca pede outra. Sondar só por estar
+/// abaixo de um pico antigo repetia rajadas num link limitado (lab 13/nov, 10 Mbps: perda 2-3x).
+struct ProbeNudge {
+    origin: std::time::Instant,
+    /// Maior pedido por segundo, nos últimos `NUDGE_WINDOW_S + 1` segundos (sem alocar por quadro).
+    buckets: [(u64, u64); NUDGE_WINDOW_S as usize + 1],
+    event: Option<NudgeEvent>,
+    count: u64,
+    /// Eventos seguidos, cada um até `NUDGE_COOLDOWN_MAX_S` depois do anterior: quedas que se repetem
+    /// são o dente de serra de um link limitado, não um pico isolado numa rede folgada.
+    streak: u32,
+    last_event_end: Option<std::time::Instant>,
+    cooldown_until: Option<std::time::Instant>,
+}
+
+#[derive(Clone, Copy)]
+struct NudgeEvent {
+    start: std::time::Instant,
+    level_bps: u64,
+    attempts: usize,
+}
+
+const NUDGE_WINDOW_S: u64 = 5;
+const NUDGE_WARMUP_S: u64 = 10;
+const NUDGE_ATTEMPTS_S: [u64; 2] = [3, 8];
+const NUDGE_GIVE_UP_S: u64 = 13;
+/// Espera após cada evento, dobrando enquanto eles se repetem. Num link limitado a estimativa oscila
+/// em dente de serra e volta sozinha, então "recuperou" não prova que a sondagem ajudou (lab 13/nov:
+/// 6-10 sondagens em 2 min a 10 Mbps com a regra anterior).
+const NUDGE_COOLDOWN_S: u64 = 60;
+const NUDGE_COOLDOWN_MAX_S: u64 = 300;
+
+impl ProbeNudge {
+    fn new(now: std::time::Instant) -> Self {
+        Self {
+            origin: now,
+            buckets: [(u64::MAX, 0); NUDGE_WINDOW_S as usize + 1],
+            event: None,
+            count: 0,
+            streak: 0,
+            last_event_end: None,
+            cooldown_until: None,
+        }
+    }
+
+    fn due(&mut self, request_bps: u64, now: std::time::Instant) -> bool {
+        use std::time::Duration;
+        if request_bps == 0 {
+            return false;
+        }
+        let second = now.saturating_duration_since(self.origin).as_secs();
+        let recent = self
+            .buckets
+            .iter()
+            .filter(|(s, _)| *s != u64::MAX && second.saturating_sub(*s) <= NUDGE_WINDOW_S)
+            .map(|(_, bps)| *bps)
+            .max()
+            .unwrap_or(0);
+        let slot = &mut self.buckets[(second % (NUDGE_WINDOW_S + 1)) as usize];
+        if slot.0 != second {
+            *slot = (second, 0);
+        }
+        slot.1 = slot.1.max(request_bps);
+        let Some(mut event) = self.event else {
+            let cooling = self.cooldown_until.is_some_and(|until| now < until);
+            if !cooling && second >= NUDGE_WARMUP_S && request_bps * 10 < recent * 7 {
+                self.event = Some(NudgeEvent {
+                    start: now,
+                    level_bps: recent,
+                    attempts: 0,
+                });
+            }
+            return false;
+        };
+        let elapsed = now.saturating_duration_since(event.start);
+        let recovered = request_bps * 10 >= event.level_bps * 7;
+        if recovered || elapsed >= Duration::from_secs(NUDGE_GIVE_UP_S) {
+            let repeated = self.last_event_end.is_some_and(|end| {
+                event.start.saturating_duration_since(end)
+                    < Duration::from_secs(NUDGE_COOLDOWN_MAX_S)
+            });
+            self.streak = if repeated {
+                self.streak.saturating_add(1)
+            } else {
+                0
+            };
+            let wait = NUDGE_COOLDOWN_S
+                .saturating_mul(1 << self.streak.min(8))
+                .min(NUDGE_COOLDOWN_MAX_S);
+            self.cooldown_until = Some(now + Duration::from_secs(wait));
+            self.last_event_end = Some(now);
+            self.event = None;
+            return false;
+        }
+        let due = NUDGE_ATTEMPTS_S
+            .get(event.attempts)
+            .is_some_and(|at| elapsed >= Duration::from_secs(*at));
+        if due {
+            event.attempts += 1;
+            self.count += 1;
+        }
+        self.event = Some(event);
+        due
+    }
 }
 
 struct DiagnosticWindow {
@@ -58,6 +174,9 @@ struct DiagnosticWindow {
     frames: u64,
     bytes: u64,
     keyframes: u64,
+    /// Soma do QP médio por quadro e quadros com QP, acumulados (só backends que informam).
+    qp_sum: u64,
+    qp_frames: u64,
     last_au_bytes: usize,
     max_au_bytes: usize,
     capture_to_au_max_ms: f64,
@@ -83,6 +202,8 @@ impl DiagnosticWindow {
             frames: 0,
             bytes: 0,
             keyframes: 0,
+            qp_sum: 0,
+            qp_frames: 0,
             last_au_bytes: 0,
             max_au_bytes: 0,
             capture_to_au_max_ms: 0.,
@@ -104,8 +225,16 @@ const MIN_KEYFRAME_INTERVAL_S: f64 = 0.5;
 const MIN_BITRATE_BPS: u64 = 1_000_000;
 
 impl Live {
+    /// O refino de tela parada ainda tem repetições a fazer.
+    pub fn refining(&self) -> bool {
+        self.refine.active()
+    }
+
     pub fn is_connected(&self) -> Option<bool> {
         self.publisher.is_connected()
+    }
+    pub fn is_terminated(&self) -> bool {
+        self.publisher.is_terminated()
     }
 
     pub fn connect(
@@ -175,6 +304,7 @@ impl Live {
                     worker_url: options.cf_url.clone().unwrap_or_default(),
                     token: options.cf_token.clone().unwrap_or_default(),
                     channel_id: options.cf_channel.clone(),
+                    direct_session_id: options.cf_direct_session.clone(),
                     track_name: "screen".into(),
                     width: config.width,
                     height: config.height,
@@ -278,10 +408,11 @@ impl Live {
             rate_busy: 0,
             wanted_bps: None,
             last_request_bps: 0,
+            fps_dirty: false,
             diagnostic: options.diagnostics.then(DiagnosticWindow::new),
             governor: governor_enabled.then(|| {
                 let governor =
-                    LoadGovernor::new(config.fps.as_f64().ceil() as u32, config.height == 1080, 0);
+                    LoadGovernor::new(config.fps.as_f64().ceil() as u32, config.height > 720, 0);
                 if governor_cpu_signals {
                     governor
                 } else {
@@ -291,6 +422,13 @@ impl Live {
             governor_wait_max_ms: 0.,
             governor_at_ms: 0,
             governor_bytes: 0,
+            probe_nudge: std::env::var_os("MADSCREEN_PROBE_NUDGE")
+                .is_none_or(|v| v != "0")
+                .then(|| ProbeNudge::new(std::time::Instant::now())),
+            forced_probe_at: std::env::var("MADSCREEN_LAB_PROBE_AT_S")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s)),
         })
     }
 
@@ -365,6 +503,10 @@ impl Live {
             window.frames += 1;
             window.bytes += au.data.len() as u64;
             window.keyframes += u64::from(au.kind == FrameKind::Key);
+            if let Some(qp) = au.qp {
+                window.qp_sum += u64::from(qp);
+                window.qp_frames += 1;
+            }
             window.last_au_bytes = au.data.len();
             window.max_au_bytes = window.max_au_bytes.max(au.data.len());
             window.capture_to_au_max_ms = window.capture_to_au_max_ms.max(age_us as f64 / 1000.);
@@ -424,8 +566,15 @@ impl Live {
             self.keyframe_armed = false;
             self.redraw_requested = false;
         }
-        if accepted {
-            self.refine.on_access_unit(au.kind == FrameKind::Key);
+        if accepted && self.refine.on_access_unit(au.kind == FrameKind::Key) {
+            // Antes da primeira mudança de taxa last_bps é o teto; o pedido do WebRTC é a taxa real.
+            let rate = match self.last_request_bps {
+                0 => u64::from(self.last_bps),
+                request => request.min(u64::from(self.last_bps)),
+            };
+            let budget = rate / 8 * u64::from(self.fps.den) / u64::from(self.fps.num.max(1));
+            self.refine
+                .keep_going_if_spending(au.data.len(), budget as usize);
         }
         self.force_keyframe(encoder, now, false);
         if let Some(request) = self.publisher.take_rate_request() {
@@ -435,16 +584,40 @@ impl Live {
                 .bitrate_bps
                 .clamp(u64::from(self.floor_bps), u64::from(self.cap_bps))
                 as u32;
-            if let Some(ramp) = self.rate_ramp.as_mut() {
-                ramp.request(request.bitrate_bps);
-            } else {
+            if self.rate_ramp.is_none() {
                 self.wanted_bps = Some(target);
             }
+        }
+        if self
+            .forced_probe_at
+            .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            self.forced_probe_at = None;
+            self.publisher.request_probe();
+            tracing::info!(
+                pedido_bps = self.last_request_bps,
+                "sondagem de banda forçada (laboratório)"
+            );
+        }
+        if let Some(nudge) = self.probe_nudge.as_mut()
+            && nudge.due(self.last_request_bps, std::time::Instant::now())
+        {
+            self.publisher.request_probe();
+            tracing::info!(
+                pedido_bps = self.last_request_bps,
+                nivel_anterior_bps = nudge.event.map_or(0, |e| e.level_bps),
+                sondagens = nudge.count,
+                "sondagem de banda pedida apos queda da estimativa"
+            );
         }
         let rate_now_ms = self.rate_ramp.as_ref().map_or(0, |_| {
             u64::try_from(self.rate_origin.elapsed().as_millis()).unwrap_or(u64::MAX)
         });
-        if let Some(ramp) = &self.rate_ramp {
+        if let Some(ramp) = self.rate_ramp.as_mut() {
+            // Todo quadro: o WebRTC só avisa mudanças, e o piso sobe em degraus pelo relógio.
+            if self.last_request_bps > 0 {
+                ramp.request_at(self.last_request_bps, rate_now_ms);
+            }
             use madscreen_encode::{backend::BackendKind, rate::RatePacing};
             let pacing = if encoder.rate_change_reopens() {
                 RatePacing::REOPEN
@@ -460,11 +633,14 @@ impl Live {
             self.wanted_bps = ramp.target_paced(rate_now_ms, pacing);
         }
         // O pedido fica guardado até o encoder aceitar (reconfigurar exige o pipeline vazio).
-        if let Some(target) = self.wanted_bps {
+        if let Some(target) = self.wanted_bps.or(self.fps_dirty.then_some(self.last_bps)) {
             let delta = target.abs_diff(self.last_bps);
             // RateRamp already applies its deadband, including exact cap/floor
             // convergence. A second legacy filter would discard its final step.
-            if self.rate_ramp.is_none() && u64::from(delta) * 50 < u64::from(self.last_bps) {
+            if self.rate_ramp.is_none()
+                && !self.fps_dirty
+                && u64::from(delta) * 50 < u64::from(self.last_bps)
+            {
                 self.wanted_bps = None;
             } else {
                 let reconfigure_started =
@@ -488,11 +664,13 @@ impl Live {
                         self.last_bps = target;
                         self.rate_applied += 1;
                         self.wanted_bps = None;
+                        self.fps_dirty = false;
                     }
                     Err(madscreen_encode::EncodeError::Busy) => self.rate_busy += 1,
                     Err(error) => {
                         tracing::warn!(%error, "falha ao reconfigurar bitrate");
                         self.wanted_bps = None;
+                        self.fps_dirty = false;
                     }
                 }
             }
@@ -537,7 +715,7 @@ impl Live {
         let produced_bps = (self.governor_at_ms > 0 && elapsed_ms > 0)
             .then(|| bytes.saturating_mul(8_000) / elapsed_ms);
         self.governor_at_ms = at_ms;
-        governor.observe(Window {
+        let changed = governor.observe(Window {
             at_ms,
             captured,
             submitted,
@@ -546,7 +724,15 @@ impl Live {
             system_cpu_percent: None,
             requested_bps: (self.last_request_bps > 0).then_some(self.last_request_bps),
             produced_bps,
-        })
+        });
+        // Sem isto o encoder segue orçando taxa/60 por quadro e produz metade do alvo a 30 FPS.
+        if let Some(target) = changed
+            && let Ok(fps) = FrameRate::new(target.fps, 1)
+        {
+            self.fps = fps;
+            self.fps_dirty = true;
+        }
+        changed
     }
     pub fn disable_governor(&mut self) {
         self.governor = None;
@@ -596,10 +782,14 @@ impl Live {
             codec_send_max_ms: window.codec_send_max_ms,
             static_refine_frames: Some(self.refine.frames),
             idle_keyframes: Some(self.idle_keyframes),
+            requested_keyframes: Some(self.keyframes_forced),
+            encoder_qp_sum: (window.qp_frames > 0).then_some(window.qp_sum),
+            encoder_qp_frames: (window.qp_frames > 0).then_some(window.qp_frames),
             governor_fps: governor_diag.as_ref().map(|g| g.target.fps),
             governor_resolution: governor_diag.as_ref().map(|g| match g.target.resolution {
                 crate::load_governor::ResolutionStep::Native => "native".into(),
                 crate::load_governor::ResolutionStep::Hd720 => "720p".into(),
+                crate::load_governor::ResolutionStep::Hd540 => "540p".into(),
             }),
             governor_changes: governor_diag.as_ref().map(|g| g.change_count),
             governor_time_at_step_ms: governor_diag.as_ref().map(|g| g.time_at_step_ms.clone()),
@@ -721,5 +911,71 @@ fn start_audio(
             tracing::warn!(%error, "não foi possível iniciar o áudio");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod probe_nudge_tests {
+    use super::ProbeNudge;
+    use std::time::{Duration, Instant};
+
+    /// Alimenta pedidos (segundo, bps) a 10 Hz e devolve os segundos em que houve sondagem.
+    fn run(steps: &[(u64, u64)], until_s: u64) -> Vec<u64> {
+        let t0 = Instant::now();
+        let mut nudge = ProbeNudge::new(t0);
+        let mut probes = Vec::new();
+        for tenth in 0..until_s * 10 {
+            let now = t0 + Duration::from_millis(tenth * 100);
+            let second = tenth / 10;
+            let bps = steps
+                .iter()
+                .rev()
+                .find(|(at, _)| *at <= second)
+                .map_or(0, |(_, b)| *b);
+            if nudge.due(bps, now) {
+                probes.push(second);
+            }
+        }
+        probes
+    }
+
+    #[test]
+    fn sharp_drop_asks_twice_then_waits_for_the_next_drop() {
+        // Pico de atraso aos 30 s: 17,6 -> 9,6 Mbps e subida lenta; sondagens em +3 s e +8 s.
+        let probes = run(&[(0, 17_600_000), (30, 9_600_000), (45, 10_500_000)], 90);
+        assert_eq!(probes, vec![33, 38]);
+    }
+
+    #[test]
+    fn recovery_after_the_first_probe_stops_the_second() {
+        let probes = run(&[(0, 17_600_000), (30, 9_600_000), (34, 17_000_000)], 60);
+        assert_eq!(probes, vec![33]);
+    }
+
+    #[test]
+    fn a_limited_link_settling_low_never_probes() {
+        // Enlace de 10 Mbps: a estimativa passa do link e assenta aos poucos, sem queda brusca.
+        let steps: Vec<(u64, u64)> = (0..60)
+            .map(|s| (s, 15_000_000u64.saturating_sub(s * 150_000).max(9_000_000)))
+            .collect();
+        assert!(run(&steps, 90).is_empty());
+    }
+
+    #[test]
+    fn a_link_that_stays_low_backs_off_between_drops() {
+        // Dente de serra num link limitado: a estimativa cai a cada 20 s e volta sozinha. Duas
+        // sondagens no primeiro evento; os seguintes esperam 60 s e depois 120 s.
+        let mut steps = Vec::new();
+        for cycle in 0..15u64 {
+            steps.push((15 + cycle * 20, 10_000_000));
+            steps.push((25 + cycle * 20, 6_000_000));
+        }
+        let probes = run(&steps, 300);
+        assert_eq!(probes, vec![28, 33, 108, 113, 248, 253]);
+    }
+
+    #[test]
+    fn startup_ramp_is_ignored() {
+        assert!(run(&[(0, 18_000_000), (5, 4_000_000), (12, 4_000_000)], 30).is_empty());
     }
 }

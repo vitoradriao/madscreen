@@ -107,6 +107,9 @@ pub struct PublisherSample {
     /// Backend efetivo (`nvenc`, `amf`, `qsv`, `x264`...); ausente em engine anterior.
     #[serde(default)]
     pub encoder: Option<String>,
+    /// Encoders recusados antes do efetivo, com o erro de cada um (ex.: AMF caindo para x264).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_fallback: Option<String>,
     #[serde(default)]
     pub output_width: Option<u32>,
     #[serde(default)]
@@ -156,6 +159,74 @@ pub struct PublisherSample {
     /// IDRs de repouso, acumulados na execução.
     #[serde(default)]
     pub idle_keyframes: Option<u64>,
+    /// IDRs pedidos pelo WebRTC e atendidos (PLI/FIR do espectador ou troca de taxa), acumulados.
+    #[serde(default)]
+    pub requested_keyframes: Option<u64>,
+    /// Soma do QP médio por quadro e quadros somados, acumulados; ausentes onde o encoder não informa.
+    #[serde(default)]
+    pub encoder_qp_sum: Option<u64>,
+    #[serde(default)]
+    pub encoder_qp_frames: Option<u64>,
+}
+
+/// IDRs por minuto na janela recente, por motivo; `other` = início, reconfiguração ou encoder.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct KeyframeRate {
+    pub window_s: f64,
+    pub total: f64,
+    pub requested: Option<f64>,
+    pub idle: Option<f64>,
+    pub other: Option<f64>,
+}
+
+const WINDOW_MS: u64 = 60_000;
+
+/// Primeira e última amostra do último minuto.
+fn window(
+    samples: &std::collections::VecDeque<PublisherSample>,
+) -> Option<(&PublisherSample, &PublisherSample)> {
+    let last = samples.back()?;
+    let first = samples
+        .iter()
+        .find(|s| last.at_ms.saturating_sub(s.at_ms) <= WINDOW_MS)?;
+    (last.at_ms > first.at_ms).then_some((first, last))
+}
+
+fn encoder_qp_average(samples: &std::collections::VecDeque<PublisherSample>) -> Option<f64> {
+    let (first, last) = window(samples)?;
+    let sum = last.encoder_qp_sum?.checked_sub(first.encoder_qp_sum?)?;
+    let frames = last
+        .encoder_qp_frames?
+        .checked_sub(first.encoder_qp_frames?)?;
+    (frames > 0).then(|| sum as f64 / frames as f64)
+}
+
+impl KeyframeRate {
+    /// `None` sem duas amostras; contador que volta atrás deixa o motivo indisponível, nunca 0.
+    fn from_samples(samples: &std::collections::VecDeque<PublisherSample>) -> Option<Self> {
+        let (first, last) = window(samples)?;
+        if last.keyframes_produced < first.keyframes_produced {
+            return None;
+        }
+        let minutes = (last.at_ms - first.at_ms) as f64 / 60_000.;
+        let delta = |a: Option<u64>, b: Option<u64>| match (a, b) {
+            (Some(a), Some(b)) if b >= a => Some(b - a),
+            _ => None,
+        };
+        let total = last.keyframes_produced - first.keyframes_produced;
+        let requested = delta(first.requested_keyframes, last.requested_keyframes);
+        let idle = delta(first.idle_keyframes, last.idle_keyframes);
+        let other = requested
+            .zip(idle)
+            .map(|(r, i)| total.saturating_sub(r + i) as f64 / minutes);
+        Some(Self {
+            window_s: minutes * 60.,
+            total: total as f64 / minutes,
+            requested: requested.map(|v| v as f64 / minutes),
+            idle: idle.map(|v| v as f64 / minutes),
+            other,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -163,6 +234,11 @@ pub struct PublisherReport {
     pub schema: u32,
     pub app_version: String,
     pub samples: Vec<PublisherSample>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyframes_per_minute: Option<KeyframeRate>,
+    /// QP médio do encoder no último minuto (o QP do player some com decodificador por hardware).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_qp_average: Option<f64>,
 }
 
 /// Um histórico por execução. Não permite que contadores de duas lives sejam combinados.
@@ -210,6 +286,8 @@ impl PublisherHistory {
             schema: 1,
             app_version,
             samples: self.0.iter().cloned().collect(),
+            keyframes_per_minute: KeyframeRate::from_samples(&self.0),
+            encoder_qp_average: encoder_qp_average(&self.0),
         }
     }
 }
@@ -217,6 +295,46 @@ impl PublisherHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn keyframe_rate_splits_reasons_over_the_last_minute() {
+        let sample = |at_ms: u64, total, requested: Option<u64>, idle| PublisherSample {
+            schema: 1,
+            run_id: "0123456789abcdef".into(),
+            provider: "livekit".into(),
+            at_ms,
+            keyframes_produced: total,
+            requested_keyframes: requested,
+            idle_keyframes: Some(idle),
+            encoder_qp_sum: Some(at_ms / 1000 * 30),
+            encoder_qp_frames: Some(at_ms / 1000),
+            ..Default::default()
+        };
+        let mut history = PublisherHistory::default();
+        assert_eq!(history.report("t".into()).keyframes_per_minute, None);
+        history.record(sample(1_000, 50, Some(40), 0)); // fora da janela de 60 s
+        history.record(sample(10_000, 99, Some(90), 0));
+        history.record(sample(40_000, 100, Some(90), 1));
+        history.record(sample(70_000, 104, Some(92), 2));
+        let rate = history.report("t".into()).keyframes_per_minute;
+        assert_eq!(
+            rate,
+            Some(KeyframeRate {
+                window_s: 60.,
+                total: 5.,
+                requested: Some(2.),
+                idle: Some(2.),
+                other: Some(1.),
+            })
+        );
+        assert_eq!(history.report("t".into()).encoder_qp_average, Some(30.));
+        // Engine antigo sem o contador: motivo indisponível, total continua.
+        history.record(sample(71_000, 105, None, 2));
+        let rate = history
+            .report("t".into())
+            .keyframes_per_minute
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!((rate.requested, rate.other), (None, None));
+    }
     #[test]
     fn old_samples_leave_saturation_unavailable() -> Result<(), Box<dyn std::error::Error>> {
         let mut value = serde_json::to_value(PublisherSample::default())?;
@@ -240,6 +358,7 @@ mod tests {
     {
         let fields = [
             "encoder",
+            "encoder_fallback",
             "output_width",
             "output_height",
             "fps_target",
@@ -256,11 +375,14 @@ mod tests {
             "codec_send_max_ms",
             "static_refine_frames",
             "idle_keyframes",
+            "requested_keyframes",
+            "encoder_qp_sum",
+            "encoder_qp_frames",
         ];
         let mut value = serde_json::to_value(PublisherSample::default())?;
         let object = value.as_object_mut().ok_or("sample object")?;
         for field in fields {
-            if field == "reduction_filter" {
+            if matches!(field, "reduction_filter" | "encoder_fallback") {
                 // Optional field is omitted when None and accepted when absent.
                 assert!(object.remove(field).is_none());
             } else {

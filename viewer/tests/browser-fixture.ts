@@ -1,3 +1,4 @@
+import { checkFriends } from "./friends-fixture";
 import { createLogin, createWatchLayout } from "../shared/ui";
 import { showTrayNotice } from "../../apps/madscreen-app/src/tray-notice";
 import { MadClient, ApiFailure } from "../shared/client";
@@ -84,6 +85,26 @@ try {
   check(!login.querySelector("details")!.open && Array.from(login.querySelectorAll("button")).find(b=>b.textContent?.includes("Google"))!.hidden, "Discord principal, contingência expansível e provedor desabilitado oculto");
   (window as any).loginUiHtml=login.outerHTML;
   login.remove();
+  let opens=0;
+  const oauthClient = new MadClient(location.origin);
+  oauthClient.providers = async () => ({discord:true,google:false,firstUser:false});
+  oauthClient.beginOAuth = async () => ({url:"https://hub.example.test/auth/discord/start?challenge=abc",verifier:"v"});
+  oauthClient.awaitOAuth = (_verifier: string, signal: AbortSignal) => new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new DOMException("abort","AbortError")), {once:true}));
+  const oauthLogin = createLogin(oauthClient, {openUrl(){opens++;return Promise.resolve(false);},onLoggedIn(){}});
+  document.body.append(oauthLogin); await flush();
+  Array.from(oauthLogin.querySelectorAll<HTMLButtonElement>("button")).find(b=>b.textContent==="Continuar com Discord")!.click();
+  await flush(); await flush();
+  const waitBox = oauthLogin.querySelector<HTMLElement>(".oauth-wait")!;
+  const waitButtons = () => Array.from(waitBox.querySelectorAll<HTMLButtonElement>("button")).map(b=>b.textContent?.trim());
+  check(opens===1 && waitBox.textContent?.includes("Não foi possível abrir o navegador") && waitButtons().join("|")==="Abrir no navegador|Copiar link|Cancelar", "Login pelo navegador avisa falha ao abrir e oferece reabrir e copiar o link");
+  Array.from(waitBox.querySelectorAll<HTMLButtonElement>("button")).find(b=>b.textContent?.includes("Abrir no navegador"))!.click(); await flush();
+  check(opens===2, "Abrir no navegador tenta de novo com o mesmo link");
+  Array.from(waitBox.querySelectorAll<HTMLButtonElement>("button")).find(b=>b.textContent?.includes("Copiar link"))!.click();
+  await new Promise(resolve=>setTimeout(resolve,50)); await flush();
+  check(waitButtons().some(text=>text==="Copiado"||text==="Não foi possível copiar"), "Copiar link informa o resultado");
+  Array.from(waitBox.querySelectorAll<HTMLButtonElement>("button")).find(b=>b.textContent==="Cancelar")!.click(); await flush();
+  check(!oauthLogin.querySelector(".oauth-wait"), "Cancelar encerra a espera do login");
+  oauthLogin.remove();
   let hides=0;
   showTrayNotice(async()=>{hides++;});
   const trayDialog=document.querySelector<HTMLDialogElement>("#tray-notice")!;
@@ -91,6 +112,7 @@ try {
   (window as any).trayUiHtml=trayDialog.outerHTML;
   trayDialog.querySelectorAll<HTMLButtonElement>("button")[1]!.click();await flush();
   check(hides===1&&!document.querySelector("#tray-notice"), "Confirmação da bandeja oculta somente pela ação explícita");
+  await checkFriends(check, flush);
   await checkShareResolution(check, flush);
   await checkShareChanges(check, flush);
   await checkShareFlow(check, flush);
@@ -249,15 +271,17 @@ try {
   document.body.append(layout.root);
   const directory=createServers(client,{watchLabel:username=>layout.actionLabel(username),onWatch:stream=>layout.watch(stream)});
   const liveUser=(username:string)=>({id:username,username,displayName:username,avatar:null,online:true,live:{since:Date.now()-180000,title:"Teste",viewers:0}});
+  directory.select({serverId:"test",serverName:"Teste",channelId:"test",channelName:"Geral"});
   directory.update({servers:[{id:"test",name:"Teste",role:"member",members:[],channels:[{id:"test",name:"Geral",live:[liveUser("bob"),liveUser("carol"),liveUser("dave")]}]}]} as any);
   const directoryButtons=()=>Array.from(directory.root.querySelectorAll<HTMLButtonElement>('[data-focuskey^="watch-"]'));
   check(!directory.root.querySelector('[data-focuskey="channel-rename"]') && !directory.root.querySelector('[data-focuskey="server-remove"]'),"Membro não recebe ações administrativas nos menus contextuais");
   const ownerClient=new MadClient(location.origin,client.session);
-  const ownerSnapshot={servers:[{id:"owner-server",name:"Servidor de teste",role:"owner",members:[],channels:[{id:"general",name:"Geral",live:[]},{id:"second",name:"Segundo",live:[]}]}]};
+  const ownerSnapshot={me:client.session!.user,friends:[],incoming:[],outgoing:[],servers:[{id:"owner-server",name:"Servidor de teste",role:"owner",members:[],channels:[{id:"general",name:"Geral",live:[]},{id:"second",name:"Segundo",live:[]}]}]};
   let renames=0;
   ownerClient.renameChannel=async(_server,_channel,name)=>{renames++;ownerSnapshot.servers[0]!.channels[0]!.name=name;return structuredClone(ownerSnapshot) as any;};
   const shareTargets:any[]=[];let accountOpened=0;
   const ownerDirectory=createServers(ownerClient,{onWatch:()=>{},onShare:target=>{shareTargets.push(target);},onSettings:()=>{accountOpened++;}});
+  ownerDirectory.select({serverId:"squad",serverName:"Squad",channelId:"general",channelName:"Geral"});
   document.body.append(ownerDirectory.root);ownerDirectory.update(ownerSnapshot as any);
   ownerDirectory.setConnected(true);
   (window as any).emptyDirectoryUiHtml=ownerDirectory.root.outerHTML;
@@ -377,6 +401,7 @@ try {
   (window as any).mountMenuDirectory = () => {
     const menuDirectory = createServers(ownerClient, { onWatch() {}, onShare() {} });
     const server = structuredClone(ownerSnapshot.servers[0]!);
+    menuDirectory.select({serverId:"owner-server",serverName:"Teste",channelId:"general",channelName:"Geral"});
     menuDirectory.update({ servers: [{ ...server, members: [{ ...liveUser("bruno"), role: "member" }] }] } as any);
     menuDirectory.setConnected(true);
     const shell = document.createElement("div");
@@ -393,7 +418,10 @@ try {
   ownerClient.redeemInvite=async code=>{redeemedInvite=code;return structuredClone(ownerSnapshot) as any;};
   ownerDirectory.root.querySelector<HTMLElement>('.server-add-menu > summary')!.click();await flush();
   const movedJoin=ownerDirectory.root.querySelector<HTMLFormElement>('.server-add-menu .server-join form')!;
+  ownerClient.previewInvite=async()=>({kind:'server',inviter:client.session!.user,server:{id:'owner-server',name:'Teste'},expiresAt:9999999999,maxUses:5,uses:0});
   movedJoin.querySelector('input')!.value='ABCD-EFGH';movedJoin.requestSubmit();await flush();
+  check(!redeemedInvite,'Abrir convite exige aceite explícito antes do resgate');
+  document.querySelector<HTMLButtonElement>('.server-dialog .primary')!.click();await flush();
   check(redeemedInvite==='ABCD-EFGH',"Convite no menu + mantém resgate pelo contrato existente");
   ownerDirectory.dispose();ownerDirectory.root.remove();
   check(directoryButtons().every(button=>button.textContent==="Assistir"),"Diretório oferece Assistir antes de abrir uma tela");
@@ -408,6 +436,7 @@ try {
   const volumes=slots.map(slot=>slot.querySelector<HTMLInputElement>(".volume")!);
   volumes[0]!.value="27";volumes[0]!.dispatchEvent(new Event("input"));
   check(slots[0]!.querySelector("video")!.volume===0.27 && slots[1]!.querySelector("video")!.volume===0.8,"Volume de cada tela é independente");
+  check(slots[0]!.querySelector(".volume-value")!.textContent === "27%" && volumes[0]!.getAttribute("aria-valuetext") === "27%", "O volume exibido e o anunciado acompanham o ajuste");
   volumes[0]!.value="0";volumes[0]!.dispatchEvent(new Event("input"));
   check(slots[0]!.textContent?.includes('Volume zero'),"Player distingue volume zero de ausência de faixa de áudio");
   slots[0]!.querySelector<HTMLButtonElement>(".audio-ctl button")!.click();
@@ -559,4 +588,4 @@ try {
   final.watch({username:"bob",displayName:"Bob · LiveKit"});await flush();sendTracks("bob");
   final.watch({username:"legacy",displayName:"Cloudflare"});await flush();
   (window as any).qa={ok:true,checks,mediaServerContacted:false};
-} catch(error) { (window as any).qa={ok:false,checks,error:String(error)}; }
+} catch(error) { (window as any).qa={ok:false,checks,error:error instanceof Error ? error.stack : String(error)}; }

@@ -106,7 +106,7 @@ export async function authenticate(request: Request, env: Env): Promise<Principa
   } else token = bearerToken(request);
   const principal = await verifySession(token, env.SESSION_SECRET);
   const digest = hex(await sha256(principal.sessionId));
-  await env.HUB.get(env.HUB.idFromName("hub")).assertSession(principal.uid, digest);
+  await env.HUB.get(env.HUB.idFromName("hub")).assertSession(principal.uid, digest, principal.iat);
   return principal;
 }
 

@@ -464,6 +464,14 @@ impl Output {
         }
         Ok(true)
     }
+    /// Refino de tela parada em andamento: o laço não pode dormir 100 ms entre repetições.
+    fn refining(&self) -> bool {
+        match self {
+            #[cfg(feature = "publish")]
+            Self::Live(live) => live.refining(),
+            _ => false,
+        }
+    }
     fn set_audio_muted(&self, muted: bool) {
         #[cfg(not(feature = "publish"))]
         let _ = muted;
@@ -538,6 +546,13 @@ impl Output {
             #[cfg(feature = "publish")]
             Self::Live(live) => live.is_connected(),
             _ => None,
+        }
+    }
+    fn is_terminated(&self) -> bool {
+        match self {
+            #[cfg(feature = "publish")]
+            Self::Live(live) => live.is_terminated(),
+            _ => false,
         }
     }
     fn finish(self) -> Result<()> {
@@ -1046,6 +1061,10 @@ pub(crate) fn run_profile(
         if !running.load(Ordering::Acquire) {
             break;
         }
+        if collector.output.is_terminated() {
+            return Err(anyhow::anyhow!("A sessão de compartilhamento foi encerrada. Inicie outra transmissão para continuar.")
+                .context(crate::ipc::FailureStage(madscreen_ipc::ErrorCode::Transport)));
+        }
         let now = qpc()?;
         if let Some(session) = session {
             while let Some(request) = session.take_privacy() {
@@ -1222,6 +1241,8 @@ pub(crate) fn run_profile(
             let mut requested_config = base_config.clone();
             requested_config.width = desired.width;
             requested_config.height = desired.height;
+            // base_config guarda o FPS configurado; o degrau atual pode ser menor.
+            requested_config.fps = capture_fps;
             // O publicador não é avisado da recriação: abrir no teto inicial passaria da banda
             // que o WebRTC está permitindo até a estimativa cair de novo.
             requested_config.bitrate_bps = rebuild_bitrate_bps(
@@ -1319,7 +1340,11 @@ pub(crate) fn run_profile(
             }
             capture_pending && due && pending_resolution.is_none()
         } else {
+            // Fonte sintética segue o degrau do governador como a captura real; sem isto o
+            // encoder orça a 30 FPS, recebe 60 e o governador lê estouro de banda permanente.
             now >= pacer.deadline()
+                && (capture_fps == base_config.fps
+                    || capture_due(now, last_capture_encode, frequency, capture_fps))
         };
         if due {
             let slot = slots.reserve();
@@ -1399,7 +1424,7 @@ pub(crate) fn run_profile(
                     } else {
                         conversions.push_back((slot, timing));
                     }
-                    if capture.is_some() {
+                    if capture.is_some() || capture_fps != base_config.fps {
                         // Grade fixa no FPS pedido: com o monitor acima do alvo (ex.: 179 Hz) o
                         // intervalo mínimo de 90% sozinho deixava passar ~65 FPS para 60 pedidos.
                         // Atraso de dois períodos ou mais (tela parada) reinicia a grade.
@@ -1464,17 +1489,17 @@ pub(crate) fn run_profile(
                         source.set_target_fps(Some(target.fps));
                     }
                     last_capture_encode = None;
-                    let desired = match target.resolution {
-                        crate::load_governor::ResolutionStep::Native => Size {
+                    let desired = match target.resolution.height() {
+                        None => Size {
                             width: base_config.width,
                             height: base_config.height,
                         },
-                        crate::load_governor::ResolutionStep::Hd720 => Size {
-                            width: ((u64::from(base_config.width) * 720
+                        Some(height) => Size {
+                            width: ((u64::from(base_config.width) * u64::from(height)
                                 / u64::from(base_config.height))
                                 as u32)
                                 & !1,
-                            height: 720,
+                            height,
                         },
                     };
                     if desired.width != config.width || desired.height != config.height {
@@ -1505,6 +1530,7 @@ pub(crate) fn run_profile(
                 sample.pacing_intervals_skipped = skipped;
                 sample.inflight = slots.count();
                 sample.encoder = Some(encoder_kind.id().into());
+                sample.encoder_fallback = encoder.fallback_reason().map(Into::into);
                 sample.output_width = Some(config.width);
                 sample.output_height = Some(config.height);
                 sample.fps_target = Some(config.fps.as_f64());
@@ -1556,9 +1582,9 @@ pub(crate) fn run_profile(
                     if rollback {
                         "MADSCREEN_COMPAT_TUNING=off"
                     } else if config.async_readback {
-                        "compatibilidade ou opt-in CLI"
+                        "compatibilidade, AMF ou opt-in CLI"
                     } else {
-                        "NVENC/AMF ou opt-out CLI"
+                        "NVENC ou opt-out CLI"
                     },
                 ));
                 let box_active = converter.reduction_filter()
@@ -1620,7 +1646,9 @@ pub(crate) fn run_profile(
             capture_pending = if slots.count() > 0 {
                 timer.wait_for_frame(&frame_event, poll_deadline, frequency)?
             } else {
-                frame_event.wait(100)?
+                // Com a tela parada o refino repete o quadro a cada ~16 ms; esperar 100 ms o
+                // limitava a ~10 repetições por segundo (medido no diagnóstico de 10/nov).
+                frame_event.wait(if collector.output.refining() { 4 } else { 100 })?
             };
         }
     }

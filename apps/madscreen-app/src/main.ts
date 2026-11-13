@@ -1,3 +1,4 @@
+import { confirmInvite } from "@shared/invite-ui";
 import "@shared/tokens.css";
 import "./styles.css";
 import "@shared/redesign.css";
@@ -72,6 +73,7 @@ async function showShell(): Promise<void> {
     onOpenShare: () => select("share"),
     watchLabel: username => watch.panel.actionLabel(username),
     onWatch: (friend: FriendView) => { select("watch"); watch.watch(friend); },
+    onDirectShare: friend => { select("share"); share.startWithFriend(friend); },
     onShare: target => { select("share"); share.startInChannel(target); },
     onSnapshot: next => { receivedSnapshot = true; updateDirectory(next); },
   });
@@ -137,14 +139,14 @@ async function showShell(): Promise<void> {
     if (joining) { joinAgain = true; return joining; }
     const code = pendingInvite();
     if (!code || disposed) return Promise.resolve();
-    inviteStatus.replaceChildren(banner("info", "Entrando no servidor do convite…"));
-    joining = client.completeInvite().then(next => {
+    inviteStatus.replaceChildren(banner("info", "Conferindo o convite…"));
+    joining = client.completeInvite(confirmInvite).then(next => {
       if (disposed || !next || (pendingInvite() && pendingInvite() !== code)) return;
       receivedSnapshot = true;
       updateDirectory(next);
       if (next.destination) servers.select(next.destination);
       select("servers");
-      inviteStatus.replaceChildren(banner("ok", `Você entrou em ${next.destination?.serverName ?? "seu servidor"}.`));
+      inviteStatus.replaceChildren(banner("ok", next.inviteStatus === "already_redeemed" ? "Este convite já foi usado por você. Nenhuma relação foi recriada; peça outro link se necessário." : next.destination ? `Você entrou em ${next.destination.serverName}.` : "Convite pessoal aceito. Abra Amigos para compartilhar."));
     }).catch(error => {
       if (disposed) return;
       const retry = el("button", { class: "btn sm", type: "button", textContent: "Tentar novamente" });

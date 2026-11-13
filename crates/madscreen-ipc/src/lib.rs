@@ -134,9 +134,11 @@ pub struct CloudflareTarget {
     pub url: Option<String>,
     /// Token de dono ou de convite `publisher` do Worker; nunca o App Secret do SFU.
     pub token: Option<String>,
-    /// Canal escolhido no app; ausente em clientes antigos usa o canal padrão do dono.
+    /// Canal escolhido explicitamente; ausência de canal e sessão privada é recusada pelo Hub.
     #[serde(default)]
     pub channel_id: Option<String>,
+    #[serde(default)]
+    pub direct_session_id: Option<String>,
     /// Perfil H.264 anunciado no SDP (hex de 6 dígitos), para experimentos.
     pub profile_level_id: Option<String>,
 }

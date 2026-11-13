@@ -60,7 +60,7 @@ function fakeProvider(id) {
 
 function room(env = {}, saved) {
   const ctx = memoryContext(saved);
-  const hub = { resolveShare: async () => ({ channelId: "channel" }), canWatch: async () => ({}), setLive: async () => true };
+  const hub = { resolvePublished: async () => ({}), resolveShare: async () => ({ destination: { kind: "channel", channelId: "channel" } }), canWatch: async () => ({}), setLive: async () => true };
   const stream = new StreamDO(ctx, { HUB: { idFromName: x => x, get: () => hub }, ...env });
   return { stream, ctx, hub };
 }
@@ -84,7 +84,7 @@ test("failover automático conserva live antiga e roteia novo publicador para a 
   const env={...livekitEnv,CF_REALTIME_APP_ID:"test-app",CF_REALTIME_APP_SECRET:"test-secret",SFU_FAILOVER_ENABLED:"1"};
   const ctx=memoryContext();
   const control=new SfuControl(ctx.storage.sql,env,async()=>{});
-  const hub={resolveShare:async()=>({channelId:"channel"}),canWatch:async()=>({}),setLive:async()=>true,
+  const hub={resolveShare:async()=>({destination:{kind:"channel",channelId:"channel"}}),canWatch:async()=>({}),setLive:async()=>true,
     selectSfu:()=>control.select(),recordMediaUsage:(...args)=>control.noteUsage(...args),
     recordSfuOutcome:(...args)=>control.outcome(...args.slice(0,4),!args[1])};
   env.HUB={idFromName:x=>x,get:()=>hub};
@@ -162,7 +162,7 @@ test("StreamDO mantém contratos Cloudflare, áudio, answer e limpeza com proved
   assert.equal((await request(stream, "watch/answer", { viewerId: viewer.body.viewerId, answer: "answer" }, "friend")).status, 200);
   await request(stream, "share/stop", { generation: pub.body.generation });
   await stream.cleanPending();
-  assert.equal(cf.calls.filter(c => c[0] === "close").length, 2);
+  assert.equal(new Set(cf.calls.filter(c => c[0] === "close").map(c => c[1])).size, 2);
 });
 
 test("reinício e troca do secret preservam roteamento de assinatura/limpeza de sessões antigas", async () => {
@@ -421,4 +421,32 @@ test("sessao revogada entre autenticar e despachar ou durante subscribe nao rece
   assert.equal((await watch()).status,401);
   assert.equal(ctx.store.state.viewers.length,0);
   assert.ok(ctx.store.state.pending.length>0 || provider.calls.some(([name])=>name==="close"));
+});
+
+
+test("sessão privada exige destino consentido e fecha sockets antes de anunciar outra geração", async () => {
+  const {stream,ctx,hub} = room({SFU_PROVIDER:"livekit",...livekitEnv});
+  const target = {kind:"direct",sessionId:"d_pair"};
+  hub.resolveShare = async()=>({destination:target});
+  const provider = fakeProvider("livekit"); stream.providers.set("livekit",provider);
+  assert.equal((await request(stream,"share/start",{providers:["livekit"]})).status,200);
+  assert.equal((await request(stream,"watch/start",{providers:["livekit"]},"friend")).body.error,"destino_alterado");
+  assert.equal((await request(stream,"watch/start",{providers:["livekit"],destination:{kind:"channel",channelId:"old"}},"friend")).status,409);
+  assert.equal((await request(stream,"watch/start",{providers:["livekit"],destination:{sessionId:"d_pair",kind:"direct"}},"friend")).status,200);
+  const events=[];
+  ctx.getWebSockets=()=>[{readyState:WebSocket.READY_STATE_OPEN,send(value){events.push(JSON.parse(value).type);},close(){events.push("closed");}}];
+  await stream.forceStopDirect("owner","d_pair");
+  assert(events.includes("closed"));
+  assert(events.indexOf("ended")<events.indexOf("closed"));
+  assert.equal(ctx.store.state.publisher,null);
+});
+
+
+test("confirmar retirada de sala LiveKit não disputa DeleteRoom com RemoveParticipant", async () => {
+  const {stream}=room();
+  const provider=fakeProvider("livekit");
+  provider.close=async id=>{if(id.includes('/v-'))throw Error("participant teardown racing room deletion");};
+  stream.providers.set("livekit",provider);
+  stream.state.pending=[{provider:"livekit",sessionId:"ms-room/p-host",mids:[],inspect:true,createdAt:Date.now()},{provider:"livekit",sessionId:"ms-room/v-viewer",mids:[],inspect:true,createdAt:Date.now()}];
+  await stream.confirmRetired();
 });

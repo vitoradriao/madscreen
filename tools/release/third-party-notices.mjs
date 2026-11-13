@@ -43,7 +43,7 @@ export function render({ rust, npm }) {
     '| AMD AMF, Intel oneVPL | MIT | Dispatcher/headers; o encoder em si é do driver do fabricante. |',
     '| NVIDIA Video Codec SDK (headers NVENC) | MIT | O encoder é do driver NVIDIA. |',
     '| libwebrtc (via LiveKit/webrtc-sys) | BSD-3-Clause | Pré-compilado do projeto LiveKit. |',
-    '| LiveKit Rust SDK (`third_party/livekit`, `third_party/webrtc-sys`) | Apache-2.0 | Cópia com modificações; ver os avisos nas pastas. |',
+    '| LiveKit Rust SDK (`third_party/livekit`, `third_party/libwebrtc`, `third_party/webrtc-sys`) | Apache-2.0 | Cópia com modificações; ver os avisos nas pastas. |',
     '| Cisco OpenH264 (opcional) | BSD-2-Clause | Somente o binário oficial da Cisco cobre royalties AVC; uma DLL compilada localmente não. |', ''];
   const table = (title, rows, extra) => {
     lines.push(`## ${title}`, '', `| Pacote | Versão | Licença${extra ? ' | Dev' : ''} |`, `| --- | --- | ---${extra ? ' | ---' : ''} |`);

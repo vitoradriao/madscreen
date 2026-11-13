@@ -1,6 +1,7 @@
 import { clearInvite, inviteCodeFrom, type FriendView, type InviteDestination, type MadClient, type ServerView, type Snapshot } from "./client";
 import { ago, banner, copyText, el, initials, svg } from "./dom";
-import { avatar } from "./ui";
+import { avatar, createFriends } from "./ui";
+import { createInviteManager, confirmInvite } from "./invite-ui";
 import { icon, type IconName } from "./icons";
 import { videoTheme } from "./theme";
 
@@ -8,6 +9,7 @@ interface ServerOptions {
   onWatch(stream: FriendView): void;
   watchLabel?(username: string): string;
   onShare?(destination: InviteDestination): void;
+  onDirectShare?(friend: FriendView): void;
   onSnapshot?(snapshot: Snapshot): void;
   onSettings?(): void;
   onOpenDirectory?(): void;
@@ -19,6 +21,7 @@ export function createServers(client: MadClient, options: ServerOptions) {
   const storageKey = `ms.servers.${client.session?.user.id ?? "anonymous"}`;
   let serverId = "";
   let channelId = "";
+  let friendsHome = true;
   try { const saved = JSON.parse(localStorage.getItem(storageKey) ?? "{}"); serverId = saved.serverId ?? ""; channelId = saved.channelId ?? ""; } catch { /* Preferência corrompida. */ }
   let snapshot: Snapshot | null = null;
   let disposed = false;
@@ -56,6 +59,7 @@ export function createServers(client: MadClient, options: ServerOptions) {
   let sharing = false;
   const serverRail = el("aside", { class: "directory-rail" });
   const root = el("section", { class: "stack server-view" }, connection, alerts, operationStatus, el("div", { class: "server-workspace" }, serverRail, navigation, content, pageHost));
+  const friends = createFriends(client, { onWatch: options.onWatch, ...(options.onDirectShare ? { onShare: options.onDirectShare } : {}), onSnapshot: next => { snapshot = next; options.onSnapshot?.(next); render(); } });
   let menuFrame = 0;
   const menuObserver = new ResizeObserver(queueMenuLayout);
   function queueMenuLayout(): void {
@@ -199,7 +203,7 @@ export function createServers(client: MadClient, options: ServerOptions) {
       const next = await operation();
       if (!disposed && next) {
         snapshot = next;
-        if (next.destination) { serverId = next.destination.serverId; channelId = next.destination.channelId; remember(); }
+        if (next.destination) { friendsHome = false; serverId = next.destination.serverId; channelId = next.destination.channelId; remember(); }
         options.onSnapshot?.(next);
       }
     } catch (error) {
@@ -224,9 +228,7 @@ export function createServers(client: MadClient, options: ServerOptions) {
     const input = el("input", { class: "input", id: `${titleId}-link`, value: invite.link, readOnly: true });
     const linkLabel = el("label", { textContent: "Link do convite" });
     linkLabel.htmlFor = input.id;
-    // O Worker responde em segundos; aceita milissegundos por segurança.
-    const expiresMs = invite.expiresAt > 1e12 ? invite.expiresAt : invite.expiresAt * 1000;
-    const days = Math.max(1, Math.round((expiresMs - Date.now()) / 86_400_000));
+    const days = Math.max(1, Math.round((invite.expiresAt * 1000 - Date.now()) / 86_400_000));
     const where = invite.destination ? `${invite.destination.serverName} · # ${invite.destination.channelName}` : server.name;
     const terms = el("p", { class: "small muted", textContent: `Leva para ${where}. Vale por ${days} ${days === 1 ? "dia" : "dias"} e para até ${invite.maxUses} ${invite.maxUses === 1 ? "pessoa" : "pessoas"}. Quem ainda não tem o madscreen pode baixar o app ou assistir pelo navegador a partir do link.` });
     const copyStatus = el("p", { class: "small", role: "status" });
@@ -308,6 +310,9 @@ export function createServers(client: MadClient, options: ServerOptions) {
       joinValue = value;
       if (!value.trim()) { input.focus(); return; }
       void run(async () => {
+        const session = client.session;
+        if (!await confirmInvite(await client.previewInvite(value))) return;
+        if (disposed || client.session !== session) return;
         const next = await client.redeemInvite(inviteCodeFrom(value, client.base));
         joinValue = ""; joinPreview = ""; joinTarget = ""; joinVersion++;
         clearInvite();
@@ -338,9 +343,12 @@ export function createServers(client: MadClient, options: ServerOptions) {
     const channel = server?.channels.find(item => item.id === channelId) ?? server?.channels[0];
     if (snapshot?.servers) { serverId = server?.id ?? ""; channelId = channel?.id ?? ""; remember(); }
     const rail = el("nav", { class: "server-rail" });
+    const home = button("Amigos", "Abrir Amigos", "friends-home", () => { friendsHome = true; render(); options.onOpenDirectory?.(); });
+    home.prepend(svg(icon("users")));
+    home.setAttribute("aria-pressed", String(friendsHome)); rail.append(home);
     rail.setAttribute("aria-label", "Escolher servidor");
     for (const item of servers) {
-      const pick = button("", item.name, `server-${item.id}`, () => { serverId = item.id; channelId = ""; render(); options.onOpenDirectory?.(); });
+      const pick = button("", item.name, `server-${item.id}`, () => { friendsHome = false; serverId = item.id; channelId = ""; render(); options.onOpenDirectory?.(); });
       pick.append(initials(item.name));
       pick.classList.add("server-pick");
       const liveCount = item.channels.reduce((total, channel) => total + channel.live.length, 0);
@@ -352,6 +360,8 @@ export function createServers(client: MadClient, options: ServerOptions) {
     addServer.menu.classList.add("server-add-menu");
     const addSummary = addServer.menu.querySelector("summary")!;
     addSummary.setAttribute("aria-label", "Adicionar servidor");
+    addSummary.replaceChildren(svg(icon("plus")));
+    addSummary.title = "Adicionar servidor";
     addServer.items.append(menuButton("Criar servidor", "Criar servidor", "server-create", createServer, "plus"));
     rail.append(addServer.menu);
     serverRail.replaceChildren(el("div", { class: "directory-brand", ariaLabel: "madscreen" }, svg(icon("logo"))), rail);
@@ -409,7 +419,7 @@ export function createServers(client: MadClient, options: ServerOptions) {
         actions.prepend(button("Convidar", "Criar convite deste canal", "invite", () => { void run(() => invite(server)); }));
         const sideInvite = button("Convidar amigos", "Criar convite deste canal", "side-invite", () => { void run(() => invite(server)); }); sideInvite.prepend(svg(icon("userPlus", "sm"))); sideActions.prepend(sideInvite);
         const channelMenu = actionMenu("Opções do canal", `channel-${channel.id}`);
-        sideActions.append(channelMenu.menu);
+        sideActions.append(channelMenu.menu, createInviteManager(client, server.id));
         channelMenu.items.append(menuButton("Novo canal", "Criar canal", "channel-create", () => {
           void ask("Criar canal", "", undefined, "Nome do canal").then(name => { if (name) void run(() => client.createChannel(server.id, name)); });
         }, "plus"));
@@ -496,7 +506,11 @@ export function createServers(client: MadClient, options: ServerOptions) {
           const permissions = actionMenu("⋯", `member-${person.id}`);
           permissions.menu.querySelector("summary")!.setAttribute("aria-label", `Opções de ${person.displayName}`);
           permissions.items.append(menuButton(person.role === "admin" ? "Remover admin" : "Tornar admin", `Alterar permissão de ${person.displayName}`, `role-${person.id}`, () => { void run(() => client.setMemberRole(server.id, person.id, person.role === "admin" ? "member" : "admin")); }, "key"));
+          permissions.items.append(menuButton("Transferir propriedade", `Transferir propriedade para ${person.displayName}`, `transfer-${person.id}`, () => { void ask("Transferir propriedade?", undefined, `${person.displayName} será o novo dono. Você ficará como administrador.`).then(ok => { if (ok) void run(() => client.transferServer(server.id, person.id)); }); }));
           row.append(permissions.menu);
+        }
+        if (person.id !== snapshot?.me?.id && person.role !== "owner" && (server.role === "owner" || server.role === "admin" && person.role === "member")) {
+          row.append(button("Remover", `Remover ${person.displayName} do servidor`, `kick-${person.id}`, () => { void ask("Remover membro?", undefined, `${person.displayName} perderá acesso aos canais e às transmissões deste servidor.`).then(ok => { if (ok) void run(() => client.removeMember(server.id, person.id)); }); }));
         }
         roster.append(row);
       }
@@ -511,6 +525,7 @@ export function createServers(client: MadClient, options: ServerOptions) {
         body.querySelector(".channel-main")?.append(callout);
       }
       const serverMenu = actionMenu(server.name, `server-${server.id}`);
+      if (server.role !== "member") serverMenu.items.append(createInviteManager(client, server.id));
       serverMenu.menu.classList.add("server-title-menu");
       const serverSummary = serverMenu.menu.querySelector("summary")!;
       serverSummary.setAttribute("aria-label", "Opções do servidor");
@@ -518,13 +533,13 @@ export function createServers(client: MadClient, options: ServerOptions) {
       serverSummary.replaceChildren(el("span", { class: "server-title", textContent: server.name }), svg(icon("chevronDown", "sm")));
       navigation.querySelector('.server-name')?.replaceWith(serverMenu.menu);
       const leaveServer = menuButton("Sair do servidor", "Sair do servidor", "server-leave", () => {
-        void ask("Sair do servidor?", undefined, server.role === "owner" ? "Outro membro assumirá como dono. Se não houver outros membros, o servidor será apagado." : "Você precisará de um novo convite para voltar.").then(ok => { if (ok) void run(() => client.leaveServer(server.id)); });
+        void ask("Sair do servidor?", undefined, "Suas transmissões neste servidor serão encerradas. Você precisará de um novo convite para voltar.").then(ok => { if (ok) void run(() => client.leaveServer(server.id)); });
       }, "logout");
       if (server.role === "owner") {
         serverMenu.items.append(menuButton("Renomear servidor", "Renomear servidor", "server-rename", () => { void ask("Renomear servidor", server.name, undefined, "Nome do servidor").then(name => { if (name) void run(() => client.renameServer(server.id, name)); }); }));
       }
       if (server.role === "owner") serverMenu.items.append(el("hr", { class: "menu-sep" }));
-      serverMenu.items.append(leaveServer);
+      if (server.role !== "owner") serverMenu.items.append(leaveServer);
       if (server.role === "owner") {
         const remove = menuButton("Apagar servidor", "Apagar servidor", "server-remove", () => { void ask("Apagar servidor?", undefined, "Todos os canais, convites e transmissões deste servidor serão encerrados.").then(ok => { if (ok) void run(() => client.removeServer(server.id)); }); });
         remove.classList.add("destructive");
@@ -575,6 +590,13 @@ export function createServers(client: MadClient, options: ServerOptions) {
     if (user) accountButton.append(avatar(user, true));
     serverRail.append(accountButton);
     serverRail.querySelector(".directory-brand")?.replaceChildren("m.");
+    content.classList.toggle("friends-content", friendsHome);
+    if (friendsHome) {
+      workspace.querySelector(":scope > .server-members")?.remove();
+      navigation.replaceChildren(el("h1", { textContent: "Amigos" }), shortcuts);
+      content.replaceChildren(friends.root);
+      if (snapshot) friends.update(snapshot);
+    }
     applyPage();
     queueMenuLayout();
     refreshWatchActions();
@@ -631,13 +653,13 @@ export function createServers(client: MadClient, options: ServerOptions) {
     setSharing(active: boolean) { if (sharing !== active) { sharing = active; applyPage(); } },
     root,
     show: refreshWatchActions,
-    update(next: Snapshot) { if (disposed) return; snapshot = next; if (next.destination) { serverId = next.destination.serverId; channelId = next.destination.channelId; } render(); },
-    select(target: InviteDestination) { serverId = target.serverId; channelId = target.channelId; remember(); render(); },
-    setConnected(connected: boolean) { connection.hidden = connected; connection.textContent = "Sem conexão. Tentando reconectar…"; },
+    update(next: Snapshot) { if (disposed) return; snapshot = next; if (next.destination) { friendsHome = false; serverId = next.destination.serverId; channelId = next.destination.channelId; } render(); },
+    select(target: InviteDestination) { friendsHome = false; serverId = target.serverId; channelId = target.channelId; remember(); render(); },
+    setConnected(connected: boolean) { friends.setConnected(connected); connection.hidden = connected; connection.textContent = "Sem conexão. Tentando reconectar…"; },
     showError(error: unknown) {
       const retry = button("Tentar novamente", "Carregar servidores novamente", "retry-directory", () => { void run(() => client.servers()); });
       alerts.replaceChildren(banner("error", error instanceof Error ? error.message : "Não foi possível entrar no servidor."), retry);
     },
-    dispose() { disposed = true; narrowMembers?.removeEventListener("change", onNarrowMembers); clearTimeout(joinTimer); menuObserver.disconnect(); cancelAnimationFrame(menuFrame); window.removeEventListener("resize", queueMenuLayout); window.removeEventListener("scroll", queueMenuLayout, true); root.removeEventListener("toggle", onMenuToggle, true); document.removeEventListener("pointerdown", closeMenus); root.removeEventListener("keydown", closeMenus); clearInterval(ageTimer); liveTimes.clear(); watchButtons.clear(); for (const dialog of dialogs) dialog.close(); dialogs.clear(); },
+    dispose() { friends.dispose(); disposed = true; narrowMembers?.removeEventListener("change", onNarrowMembers); clearTimeout(joinTimer); menuObserver.disconnect(); cancelAnimationFrame(menuFrame); window.removeEventListener("resize", queueMenuLayout); window.removeEventListener("scroll", queueMenuLayout, true); root.removeEventListener("toggle", onMenuToggle, true); document.removeEventListener("pointerdown", closeMenus); root.removeEventListener("keydown", closeMenus); clearInterval(ageTimer); liveTimes.clear(); watchButtons.clear(); for (const dialog of dialogs) dialog.close(); dialogs.clear(); },
   };
 }

@@ -84,6 +84,11 @@ impl ManagedLiveKit {
                             }
                         }
                         Err(Error::StaleGeneration) => break,
+                        Err(Error::Status { status, .. })
+                            if matches!(status.as_u16(), 401 | 403) =>
+                        {
+                            break;
+                        }
                         Err(error) => {
                             failures += 1;
                             tracing::warn!(%error, "falha no heartbeat LiveKit/Worker");
@@ -175,6 +180,9 @@ impl Publisher for ManagedLiveKit {
     }
     fn is_connected(&self) -> Option<bool> {
         Some(self.active.load(Ordering::Acquire) && self.publisher.is_connected())
+    }
+    fn is_terminated(&self) -> bool {
+        !self.active.load(Ordering::Acquire)
     }
     fn audio_sink(&self) -> Option<Sink> {
         let pusher = self.publisher.audio_pusher()?;

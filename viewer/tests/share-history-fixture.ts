@@ -37,6 +37,7 @@ export async function checkShareHistory(check:(ok:unknown,label:string)=>void,fl
   const target={serverId:"server",serverName:"Teste",channelId:"channel",channelName:"Geral"};
   const directory={servers:[{id:"server",name:"Teste",channels:[{id:"channel",name:"Geral"}]}]} as any;
   let view=createShareView();document.body.append(view.root);view.updateDirectory(directory);
+    { const audience=view.root.querySelector<HTMLSelectElement>('select[aria-label="Canal da transmissão"]')!; audience.value="channel"; audience.dispatchEvent(new Event("change")); }
   const button=(text:string)=>[...view.root.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent===text)!;
   const recent=()=>[...document.querySelectorAll<HTMLButtonElement>(".pk-body button")].find(b=>b.textContent?.startsWith("game.exe ·"))!;
   try {
@@ -69,6 +70,7 @@ export async function checkShareHistory(check:(ok:unknown,label:string)=>void,fl
     failChange=false;
     view.dispose?.();view.root.remove();
     view=createShareView();document.body.append(view.root);view.updateDirectory(directory);
+    { const audience=view.root.querySelector<HTMLSelectElement>('select[aria-label="Canal da transmissão"]')!; audience.value="channel"; audience.dispatchEvent(new Event("change")); }
     windows=[prior[0],{...prior[0],hwnd:457}];button("Escolher janela ou tela").click();await flush();
     check(recent().disabled,"Duas janelas do mesmo app exigem escolha explícita");
     check(!!document.querySelector('[aria-label="Aplicativo sugerido"]'),"Sugestão identifica inequivocamente uma janela mesmo com dois apps iguais");
@@ -95,7 +97,8 @@ export async function checkShareHistory(check:(ok:unknown,label:string)=>void,fl
     for(const useRecent of [false,true]){
       view.root.remove();
       localStorage.setItem(key,JSON.stringify({version:1,apps:useRecent?[preference]:[]}));
-      view=createShareView();document.body.append(view.root);view.updateDirectory(directory);await flush();
+      view=createShareView();document.body.append(view.root);view.updateDirectory(directory);
+    { const audience=view.root.querySelector<HTMLSelectElement>('select[aria-label="Canal da transmissão"]')!; audience.value="channel"; audience.dispatchEvent(new Event("change")); }await flush();
       let clicks=0;
       const count=()=>{clicks++;};document.addEventListener("click",count,true);
       try{
@@ -147,14 +150,17 @@ export async function checkShareHistory(check:(ok:unknown,label:string)=>void,fl
     const reviewed=await customPending;
     check(reviewed?.audio?.system!==true&&!(reviewed?.audio?.apps.length),"Revisão customizada só usa som explicitamente escolhido no painel");
     view=createShareView();document.body.append(view.root);view.updateDirectory(directory);
+    { const audience=view.root.querySelector<HTMLSelectElement>('select[aria-label="Canal da transmissão"]')!; audience.value="channel"; audience.dispatchEvent(new Event("change")); }
     button("Escolher janela ou tela").click();await flush();recent().click();await flush();
     listDenied=true;button("Compartilhar").click();await flush();
     check(starts.length===4&&view.root.textContent?.includes("Permissão de janela indisponível"),"Permissão perdida após seleção falha sem captura ou fallback");
     listDenied=false;
     let release!:()=>void;listGate=new Promise<void>(resolve=>{release=resolve;});
-    button("Tentar novamente").click();await flush();view.updateDirectory({servers:[]} as any);release();await flush();listGate=null;
+    button("Tentar novamente").click();await flush();view.updateDirectory({servers:[]} as any);
+    { const audience=view.root.querySelector<HTMLSelectElement>('select[aria-label="Canal da transmissão"]')!; audience.value="channel"; audience.dispatchEvent(new Event("change")); }release();await flush();listGate=null;
     check(starts.length===4,"Canal removido durante revalidação impede publicação tardia");
     view.updateDirectory(directory);
+    { const audience=view.root.querySelector<HTMLSelectElement>('select[aria-label="Canal da transmissão"]')!; audience.value="channel"; audience.dispatchEvent(new Event("change")); }
     listGate=new Promise<void>(resolve=>{release=resolve;});button("Compartilhar").click();await flush();
     const ownSession=client.session;client.session=null;release();await flush();listGate=null;
     check(starts.length===4,"Logout durante revalidação impede publicação tardia sem nova autorização");client.session=ownSession;

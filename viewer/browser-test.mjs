@@ -138,6 +138,8 @@ try {
       window.fullscreenCheck={streams:[...document.querySelectorAll('video')].map(video=>video.srcObject),classes:document.querySelector('.watch-grid').className};
       [...document.querySelectorAll('button')].find(button=>button.getAttribute('aria-label')?.startsWith('Selecionar Tela 1:')).click();
     })()`);
+    // Permissão limitada à origem de loopback no perfil descartável do Chrome headless.
+    await send('Browser.setPermission',{permission:{name:'fullscreen',allowWithoutGesture:true},setting:'granted',origin:`http://127.0.0.1:${server.address().port}`});
     const splitFullscreen=await send('Runtime.evaluate',{expression:`document.querySelectorAll('.stage')[1].requestFullscreen()`,awaitPromise:true,userGesture:true});
     if(splitFullscreen.exceptionDetails)throw Error('Não entrou em tela cheia no splitscreen');
     geometry.push(...await inspect('Tela cheia de uma das duas transmissões'));
@@ -148,20 +150,27 @@ try {
       return videos[0].muted===before[0]&&videos[1].muted!==before[1]&&document.querySelector('.watch-grid').className===window.fullscreenCheck.classes;
     })()`);
     if(!shortcuts)throw Error('Atalhos afetaram a outra tela ou trocaram destaque durante tela cheia');
-    await evaluate('document.exitFullscreen()');
-    const restored=await evaluate(`(() => {
-      const videos=[...document.querySelectorAll('video')];
-      return document.querySelector('.watch-grid').className===window.fullscreenCheck.classes&&videos.every((video,index)=>video.srcObject===window.fullscreenCheck.streams[index]);
-    })()`);
-    if(!restored)throw Error('Tela cheia alterou o layout ou reconectou a mídia');
-    const helpFullscreen=await send('Runtime.evaluate',{expression:`document.querySelectorAll('.stage')[1].requestFullscreen()`,awaitPromise:true,userGesture:true});
-    if(helpFullscreen.exceptionDetails)throw Error('Não entrou em tela cheia para verificar ajuda');
     await evaluate(`document.querySelectorAll('.stage')[1].querySelector('button[aria-label^="Ajuda"]').click()`);
     const helpAccessible=await evaluate(`new Promise(resolve=>setTimeout(()=>resolve(!!document.fullscreenElement?.querySelector('.watch-diagnostics[open]')),100))`);
     if(!helpAccessible)throw Error('Ajuda ficou oculta fora do elemento em tela cheia');
     await evaluate(`document.fullscreenElement.querySelector('button[aria-label^="Fechar ajuda"]').click()`);
     if(!await evaluate('!!document.fullscreenElement'))throw Error('Fechar ajuda saiu da tela cheia');
-    await evaluate('document.exitFullscreen()');
+    await evaluate(`(async () => {
+      const button = document.fullscreenElement.querySelector('.player-fullscreen');
+      if (!button.ariaLabel.startsWith('Sair da tela cheia:')) throw Error('Botão de saída sem rótulo');
+      const exited = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(Error('O botão não saiu da tela cheia')), 2000);
+        document.addEventListener('fullscreenchange', () => { clearTimeout(timer); resolve(); }, {once:true});
+      });
+      button.click();
+      await exited;
+      if (document.fullscreenElement || !button.ariaLabel.startsWith('Tela cheia:')) throw Error('Botão não voltou ao estado inicial');
+    })()`);
+    const restored=await evaluate(`(() => {
+      const videos=[...document.querySelectorAll('video')];
+      return document.querySelector('.watch-grid').className===window.fullscreenCheck.classes&&videos.every((video,index)=>video.srcObject===window.fullscreenCheck.streams[index]);
+    })()`);
+    if(!restored)throw Error('Tela cheia alterou o layout ou reconectou a mídia');
     result.checks.push('Ajuda abre e fecha dentro da tela cheia sem interromper a mídia');
     const featuredScreenshot=await send('Page.captureScreenshot',{format:'png'});
     await writeFile(path.join(output,'featured-splitscreen.png'),Buffer.from(featuredScreenshot.data,'base64'));
@@ -199,7 +208,8 @@ try {
     const watchScreenshot=await send('Page.captureScreenshot',{format:'png'});
     await writeFile(path.join(output,'watch-details-closed.png'),Buffer.from(watchScreenshot.data,'base64'));
     await send('Emulation.setDeviceMetricsOverride',{width:3440,height:1440,deviceScaleFactor:1,mobile:false});
-    // O CDP precisa de ativação de usuário para a API de tela cheia.
+    // O Chrome recusa uma reentrada automática logo após a saída, mesmo com a permissão do perfil.
+    await new Promise(resolve => setTimeout(resolve, 5500));
     const fullscreen=await send('Runtime.evaluate',{expression:`document.querySelector('.stage').requestFullscreen()`,awaitPromise:true,userGesture:true});
     if(fullscreen.exceptionDetails)throw Error('Não entrou em tela cheia');
     geometry.push(...await inspect('Tela cheia 21:9'));

@@ -35,4 +35,12 @@ await build({
 });
 await import(updateFailuresOutput.href);
 
+// Sessão revogada: logout local, troca de chave sem token e fechamento 4001 do hub.
+const clientSessionOutput = new URL("../target/viewer-tests/client-session.test.mjs", import.meta.url);
+await build({
+  entryPoints: [fileURLToPath(new URL("tests/client-session.test.mjs", import.meta.url))],
+  bundle: true, outfile: fileURLToPath(clientSessionOutput), platform: "node", format: "esm", target: "es2022",
+});
+await import(clientSessionOutput.href);
+
 await import("./tests/chrome-launch.test.mjs");

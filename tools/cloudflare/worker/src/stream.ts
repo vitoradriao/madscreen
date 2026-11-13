@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { ApiError, errorResponse, integerField, invalidBody, json, readJson, sdpField, textField, type Env } from "./common";
 import { activeProvider, selectedProvider, allocationProvider, createProvider, iceServers, SfuError, type ProviderId, type SfuProvider } from "./sfu";
+import { sameDestination, type StreamDestination } from "./direct";
 
 const MAX_VIEWERS = 8;
 const ALARM_INTERVAL = 10_000;
@@ -17,6 +18,7 @@ interface Publisher extends Allocation {
   name: string;
   trackName: "screen";
   channelId?: string;
+  destination?: StreamDestination;
   generation: number;
   lastHeartbeat: number;
   since: number;
@@ -53,7 +55,9 @@ interface Caller {
   name: string;
   owner: string;
   channelId: string | null;
+  destination: StreamDestination | null;
   sessionDigest: string | null;
+  sessionIat: number;
 }
 
 /**
@@ -166,7 +170,7 @@ export class StreamDO extends DurableObject<Env> {
           publisher ? allocationProvider(publisher) : null, publisher ? this.state.viewers.length : 0);
       }
       const accepted = await this.env.HUB.get(this.env.HUB.idFromName("hub")).setLive(owner,
-        publisher ? { since: publisher.since, viewers: this.state.viewers.length, title: publisher.title, ...(publisher.channelId ? { channelId: publisher.channelId } : {}) } : null);
+        publisher ? { since: publisher.since, viewers: this.state.viewers.length, title: publisher.title, ...(publisher.destination ? { destination: publisher.destination } : publisher.channelId ? { channelId: publisher.channelId } : {}) } : null);
       if (!accepted && this.state.publisher) await this.retirePublisher(owner);
     } catch {
       // O Hub é consistente depois: o próximo evento corrige.
@@ -180,20 +184,31 @@ export class StreamDO extends DurableObject<Env> {
     const name = request.headers.get("x-ms-name");
     const owner = request.headers.get("x-ms-owner");
     if (!uid || !name || !owner) throw new ApiError(401, "sessao_invalida", "Sessão inválida.");
-    return { uid, name, owner, channelId: request.headers.get("x-ms-channel"), sessionDigest: request.headers.get("x-ms-session") };
+    const target = request.headers.get("x-ms-destination");
+    return { uid, name, owner, channelId: request.headers.get("x-ms-channel"), destination: target ? JSON.parse(target) as StreamDestination : null, sessionDigest: request.headers.get("x-ms-session"), sessionIat: Number(request.headers.get("x-ms-session-iat") ?? 0) };
   }
 
   private async assertCallerSession(caller: Caller): Promise<void> {
     // The Worker strips client x-ms-* headers and supplies only the digest.
     // Missing digest retains compatibility with already-forwarded legacy calls.
-    if (caller.sessionDigest) await this.env.HUB.get(this.env.HUB.idFromName("hub")).assertSession(caller.uid, caller.sessionDigest);
+    if (caller.sessionDigest) await this.env.HUB.get(this.env.HUB.idFromName("hub")).assertSession(caller.uid, caller.sessionDigest, caller.sessionIat);
+  }
+
+  private async authorizeCurrent(caller: Caller): Promise<void> {
+    const publisher = this.state.publisher;
+    await this.env.HUB.get(this.env.HUB.idFromName("hub")).canWatch(caller.uid, caller.owner, publisher?.destination ?? publisher?.channelId);
+    if (publisher !== this.state.publisher) throw new ApiError(409, "geracao_antiga", "A transmissão mudou. Abra novamente.");
   }
 
   override async fetch(request: Request): Promise<Response> {
     try {
       const caller = this.caller(request);
       const url = new URL(request.url);
-      if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") return this.accept(request, caller);
+      if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+        await this.assertCallerSession(caller);
+        await this.authorizeCurrent(caller);
+        return this.accept(request, caller);
+      }
       const body = request.method === "POST" ? await readJson(request) : {};
       this.rateLimit(caller.uid);
       // Leituras e heartbeats só tocam campos simples: não esperam a fila de mutações do SFU.
@@ -279,7 +294,11 @@ export class StreamDO extends DurableObject<Env> {
   private async confirmRetired(retired: Allocation[] = []): Promise<void> {
     // Include durable retirements on retries after a failed first close.
     const allocations = [...new Map([...retired, ...this.state.pending].map(allocation => [allocation.sessionId, allocation])).values()];
-    const results = await Promise.allSettled(allocations.map(async allocation => {
+    // DeleteRoom closes every participant. Concurrent RemoveParticipant during room teardown
+    // can fail even after the room is gone; confirm the room once instead.
+    const closingRooms = new Set(allocations.filter(allocation => allocationProvider(allocation) === "livekit" && allocation.sessionId.split("/")[1]?.startsWith("p-")).map(allocation => allocation.sessionId.split("/")[0]));
+    const confirmations = allocations.filter(allocation => allocationProvider(allocation) !== "livekit" || !allocation.sessionId.split("/")[1]?.startsWith("v-") || !closingRooms.has(allocation.sessionId.split("/")[0]));
+    const results = await Promise.allSettled(confirmations.map(async allocation => {
       try { await this.inSession(allocation.sessionId, () => this.sfu(allocation).close(allocation.sessionId, allocation.mids)); }
       catch (error) {
         if (!(error instanceof SfuError) || ![404, 410].includes(error.upstreamStatus)) throw error;
@@ -292,6 +311,7 @@ export class StreamDO extends DurableObject<Env> {
 
   private async dispatch(request: Request, url: URL, caller: Caller, body: Record<string, unknown>): Promise<Response> {
     await this.assertCallerSession(caller);
+    if (url.pathname.startsWith("/api/stream/") || url.pathname.startsWith("/api/watch/") && url.pathname !== "/api/watch/leave") await this.authorizeCurrent(caller);
     const route = `${request.method} ${url.pathname}`;
     switch (route) {
       case "POST /api/share/start":
@@ -300,6 +320,7 @@ export class StreamDO extends DurableObject<Env> {
       case "POST /api/share/heartbeat": {
         this.requireOwner(caller);
         const publisher = this.currentPublisher(body);
+        await this.env.HUB.get(this.env.HUB.idFromName("hub")).resolvePublished(caller.uid, publisher.destination ?? publisher.channelId);
         publisher.lastHeartbeat = Date.now();
         const keyframe = publisher.keyframe;
         publisher.keyframe = false;
@@ -310,6 +331,7 @@ export class StreamDO extends DurableObject<Env> {
         this.requireOwner(caller);
         this.currentPublisher(body);
         await this.retirePublisher(caller.owner);
+        await this.confirmRetired();
         void this.cleanPending();
         return json({ ok: true });
       case "POST /api/watch/start":
@@ -332,6 +354,7 @@ export class StreamDO extends DurableObject<Env> {
       }
       case "POST /api/watch/heartbeat": {
         const viewer = this.currentViewer(caller, body);
+        await this.env.HUB.get(this.env.HUB.idFromName("hub")).canWatch(caller.uid, caller.owner, this.state.publisher?.destination ?? this.state.publisher?.channelId);
         viewer.lastSeen = Date.now();
         await this.save();
         return json({ ok: true, live: this.state.publisher !== null, generation: this.state.generation });
@@ -370,6 +393,14 @@ export class StreamDO extends DurableObject<Env> {
     });
   }
 
+  async forceStopDirect(owner: string, sessionId: string): Promise<void> {
+    await this.enqueue(async () => {
+      if (this.state.publisher?.destination?.kind === "direct" && this.state.publisher.destination.sessionId === sessionId) await this.retirePublisher(owner);
+      await this.confirmRetired();
+      await this.cleanPending();
+    });
+  }
+
   private currentPublisher(body: Record<string, unknown>): Publisher {
     const generation = integerField(body.generation);
     const publisher = this.state.publisher;
@@ -401,6 +432,9 @@ export class StreamDO extends DurableObject<Env> {
     this.state.generation++;
     await this.save();
     this.broadcast({ type: "ended", generation: this.state.generation });
+    for (const socket of this.ctx.getWebSockets()) {
+      try { socket.close(1000, "transmissao encerrada"); } catch { /* Already closed. */ }
+    }
     await this.syncHub(owner);
   }
 
@@ -469,7 +503,11 @@ export class StreamDO extends DurableObject<Env> {
     if (audioMid === mid) invalidBody();
     if (body.trackName !== undefined && body.trackName !== "screen") invalidBody();
     const title = body.title === undefined || body.title === null ? null : textField(body.title, 80);
-    const target = await this.env.HUB.get(this.env.HUB.idFromName("hub")).resolveShare(caller.uid, caller.channelId ?? undefined);
+    const target = await this.env.HUB.get(this.env.HUB.idFromName("hub")).resolveShare(caller.uid, caller.destination ?? caller.channelId ?? undefined, true);
+    const current = this.state.publisher;
+    const currentTarget = current?.destination ?? (current?.channelId ? { kind: "channel" as const, channelId: current.channelId } : null);
+    if (current && !sameDestination(currentTarget, target.destination)) throw new ApiError(409, "encerre_transmissao", "Pare a transmissão atual antes de mudar o público.");
+    if (target.destination.kind === "direct" && provider !== "livekit") throw new ApiError(409, "sfu_incompativel", "Esta sessão privada exige LiveKit.");
     await this.retirePublisher(caller.owner);
     // A substituição só é anunciada depois do fechamento forçado do publicador antigo, mas uma
     // limpeza que falha não pode impedir uma nova transmissão: o alarme repete até expirar.
@@ -486,13 +524,13 @@ export class StreamDO extends DurableObject<Env> {
     try {
       const result = await this.inSession(sessionId, () => sfu.publish(sessionId, offer, mid, audioMid));
       await this.recordOutcome(provider, true, startedAt);
-      await this.env.HUB.get(this.env.HUB.idFromName("hub")).resolveShare(caller.uid, target.channelId);
+      await this.env.HUB.get(this.env.HUB.idFromName("hub")).resolveShare(caller.uid, target.destination, true);
       await this.assertCallerSession(caller);
       this.state.generation++;
       this.state.authorizedViewerUids = [];
       this.state.publisher = {
         provider, sessionId, mids: result.tracks.map((track) => track.mid), uid: caller.uid, name: caller.name,
-        trackName: "screen", channelId: target.channelId, generation: this.state.generation, lastHeartbeat: Date.now(),
+        trackName: "screen", destination: target.destination, ...(target.destination.kind === "channel" ? { channelId: target.destination.channelId } : {}), generation: this.state.generation, lastHeartbeat: Date.now(),
         since: Math.floor(Date.now() / 1000), title, keyframe: false, audio: audioMid !== undefined,
       };
       this.state.pending = this.state.pending.filter((item) => item.sessionId !== sessionId);
@@ -519,7 +557,12 @@ export class StreamDO extends DurableObject<Env> {
   private async startViewer(caller: Caller, body: Record<string, unknown>): Promise<Response> {
     const publisher = this.state.publisher;
     if (!publisher) throw new ApiError(409, "sem_publicador", "Este amigo não está transmitindo agora.");
-    await this.env.HUB.get(this.env.HUB.idFromName("hub")).canWatch(caller.uid, caller.owner, publisher.channelId);
+    await this.env.HUB.get(this.env.HUB.idFromName("hub")).canWatch(caller.uid, caller.owner, publisher.destination ?? publisher.channelId);
+    const target = publisher.destination ?? (publisher.channelId ? { kind: "channel" as const, channelId: publisher.channelId } : undefined);
+    if (body.destination !== undefined && (!target || !sameDestination(body.destination, target))
+        || target?.kind === "direct" && caller.uid !== publisher.uid && body.destination === undefined) {
+      throw new ApiError(409, "destino_alterado", "O destino da transmissão mudou. Abra Amigos e escolha Assistir novamente.");
+    }
     const sfu = this.sfu(publisher);
     const provider = sfu.id;
     this.requireProviderClient(body, provider);
@@ -540,7 +583,7 @@ export class StreamDO extends DurableObject<Env> {
     await this.save();
     try {
       const result = await this.inSession(sessionId, () => sfu.subscribe(sessionId, publisher.sessionId, withAudio));
-      await this.env.HUB.get(this.env.HUB.idFromName("hub")).canWatch(caller.uid, caller.owner, publisher.channelId);
+      await this.env.HUB.get(this.env.HUB.idFromName("hub")).canWatch(caller.uid, caller.owner, publisher.destination ?? publisher.channelId);
       await this.assertCallerSession(caller);
       const viewerId = `${caller.owner}.${crypto.randomUUID()}`;
       this.state.viewers.push({

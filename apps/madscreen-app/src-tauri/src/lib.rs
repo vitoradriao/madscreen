@@ -106,6 +106,7 @@ fn start_share_cloudflare(
     token: Option<String>,
     audio: Option<AudioRequest>,
     channel_id: Option<String>,
+    direct_session_id: Option<String>,
     selection_id: Option<u64>,
     fps_chosen: Option<bool>,
 ) -> Result<(), String> {
@@ -126,6 +127,7 @@ fn start_share_cloudflare(
                 url,
                 token,
                 channel_id,
+                direct_session_id,
                 profile_level_id: None,
             }),
             audio: audio.map(with_own_process),

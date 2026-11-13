@@ -1,7 +1,7 @@
 [workspace]
 members = ["crates/madscreen-telemetry", "apps/madscreen-bench", "crates/madscreen-capture", "apps/madscreen-preview", "crates/madscreen-encode", "apps/madscreen-encode-test", "crates/madscreen-transport", "crates/madscreen-transport-cf", "crates/madscreen-ipc", "crates/madscreen-audio", "crates/madscreen-rtc-stats"]
 resolver = "3"
-exclude = ["third_party/livekit"]
+exclude = ["third_party/livekit", "third_party/libwebrtc"]
 
 [workspace.package]
 version = "0.1.0"
@@ -35,3 +35,6 @@ livekit = { path = "third_party/livekit" }
 
 # Native passthrough capabilities must include the external encoder High profile.
 webrtc-sys = { path = "third_party/webrtc-sys" }
+
+# Acrescenta new_encoded_screencast (fonte marcada como tela). Ver third_party/libwebrtc/MADSCREEN_PATCH.md.
+libwebrtc = { path = "third_party/libwebrtc" }

@@ -2,7 +2,7 @@ import {
   changeShare, errorText, getPublisherDiagnostics, getSettings, getState, listMonitors, listSources, outputOptions, setSharePrivacy, startShareCloudflare, stopShare,
   type EncoderLimits, type OutputOption, type Phase, type PickedSource, type Settings, type ShareState,
 } from "../api";
-import { connectStreamEvents, type StreamEvent, type InviteDestination, type Snapshot } from "@shared/client";
+import { connectStreamEvents, type StreamEvent, type InviteDestination, type FriendView, type Snapshot } from "@shared/client";
 import { createWatchPanel, type WatchPanel } from "@shared/ui";
 import { banner, el, segmented, type View } from "../dom";
 import { client, WORKER_URL } from "../session";
@@ -18,6 +18,10 @@ const PHASE_LABEL: Record<Phase, string> = {
   live: "Ao vivo",
   stopping: "Parando…",
 };
+
+type ShareTarget = InviteDestination | { sessionId: string; peerId: string; peerName: string };
+const targetKey = (target: ShareTarget | null): string => target ? "sessionId" in target ? target.sessionId : target.channelId : "";
+const targetLabel = (target: ShareTarget): string => "sessionId" in target ? `Com ${target.peerName} · Somente ${target.peerName} poderá assistir` : `${target.serverName} / ${target.channelName}`;
 
 const HEIGHT_CHOICES = [720, 1080, 1440, 2160, 0];
 /** Megabits por segundo com vírgula decimal, como o restante do app em pt-BR. */
@@ -39,6 +43,7 @@ export interface ShareView extends View {
   cancelPending(): void;
   updateDirectory(snapshot: Snapshot): void;
   startInChannel(target: InviteDestination): void;
+  startWithFriend(friend: FriendView): void;
 }
 
 export function createShareView(): ShareView {
@@ -53,6 +58,7 @@ export function createShareView(): ShareView {
   let preparing = false;
   let disposed = false;
   let pendingSource: AbortController | null = null;
+  let directStartVersion = 0;
   let heightEdited = false;
   let fpsEdited = false;
   let savedSettings: Settings | null = null;
@@ -61,14 +67,14 @@ export function createShareView(): ShareView {
   let selectedSource: PickedSource | null = null;
   let retryStart = false;
   let confirmedSound: string | null = null;
-  let activeDestination: InviteDestination | null = null;
+  let activeDestination: ShareTarget | null = null;
   let latestState: ShareState | null = null;
   let limits: EncoderLimits | null = null;
   let options = fallbackOptions();
   let optionsToken = 0;
   let pendingOptions = Promise.resolve();
   let adjustment: string | null = null;
-  let channel: InviteDestination | null = null;
+  let channel: ShareTarget | null = null;
   let channels: InviteDestination[] = [];
   let preferredChannel = "";
   const channelKey = `ms.share.channel.${client.session?.user.id ?? "anonymous"}`;
@@ -92,8 +98,9 @@ export function createShareView(): ShareView {
   channelSelect.setAttribute("aria-label", "Canal da transmissão");
   channelSelect.addEventListener("change", () => {
     channel = channels.find(item => item.channelId === channelSelect.value) ?? null;
-    preferredChannel = channel?.channelId ?? "";
+    preferredChannel = targetKey(channel);
     try { localStorage.setItem(channelKey, preferredChannel); } catch { /* Sem armazenamento. */ }
+    syncControls();
   });
 
   const resolution = el("div", { class: "res-grid", role: "radiogroup" });
@@ -365,8 +372,8 @@ export function createShareView(): ShareView {
       ? state.audio_active == null || state.audio_active === 0 ? "Sem áudio ativo. Confira a fonte e as opções de som ao trocar janela ou tela."
         : confirmedSound ?? `Som de ${state.audio_active} ${state.audio_active === 1 ? "fonte" : "fontes"}`
       : selectedSource ? soundChoice(selectedSource) : "Escolha a fonte e o som no seletor. Sem microfone.";
-    destination.hidden = !active;
-    destination.textContent = activeDestination ? `Transmitindo em ${activeDestination.serverName} / ${activeDestination.channelName}` : "Canal da transmissão não informado";
+    destination.hidden = !active && !channel;
+    destination.textContent = activeDestination ? `Transmitindo: ${targetLabel(activeDestination)}` : channel ? targetLabel(channel) : "Escolha com quem compartilhar";
     chooseSource.hidden = active;
     chooseSource.classList.toggle("primary", !selectedSource);
     chooseSource.textContent = selectedSource ? "Trocar fonte ou som" : "Escolher janela ou tela";
@@ -523,7 +530,7 @@ export function createShareView(): ShareView {
     try {
       const selectedChannel = channel;
       const consentToken=client.session?.token;
-      if (!selectedChannel) throw new Error("Entre em um servidor e escolha um canal antes de transmitir.");
+      if (!selectedChannel) throw new Error("Escolha um amigo online ou um canal antes de transmitir.");
       await initialization;
       if (disposed || operation.signal.aborted) return;
       const source = await pickSource(operation.signal, { quickStart, recent:readHistory(),
@@ -542,8 +549,8 @@ export function createShareView(): ShareView {
         confirmedSound = soundChoice(source);
         activeDestination = selectedChannel;
         await revalidate(source,operation.signal);
-        if(disposed||operation.signal.aborted||channel?.channelId!==selectedChannel.channelId||!client.session||client.session.token!==consentToken)return;
-        await startShareCloudflare(height, fps, source, WORKER_URL, client.token, source.audio, selectedChannel.channelId, fpsEdited);
+        if(disposed||operation.signal.aborted||targetKey(channel)!==targetKey(selectedChannel)||!client.session||client.session.token!==consentToken)return;
+        await startShareCloudflare(height, fps, source, WORKER_URL, client.token, source.audio, "sessionId" in selectedChannel ? undefined : selectedChannel.channelId, fpsEdited, "sessionId" in selectedChannel ? selectedChannel.sessionId : undefined);
       }
     } catch (error) {
       if (!disposed && !operation.signal.aborted) {
@@ -577,10 +584,10 @@ export function createShareView(): ShareView {
         await pendingOptions;
         if (disposed || operation.signal.aborted) return;
         await revalidate(source,operation.signal);
-        if(disposed||operation.signal.aborted||channel?.channelId!==target.channelId||!client.session||client.session.token!==consentToken)return;
+        if(disposed||operation.signal.aborted||targetKey(channel)!==targetKey(target)||!client.session||client.session.token!==consentToken)return;
         confirmedSound = soundChoice(source);
         activeDestination = target;
-        await startShareCloudflare(height, fps, source, WORKER_URL, client.token, source.audio, target.channelId, fpsEdited);
+        await startShareCloudflare(height, fps, source, WORKER_URL, client.token, source.audio, "sessionId" in target ? undefined : target.channelId, fpsEdited, "sessionId" in target ? target.sessionId : undefined);
       }
     } catch (error) {
       if (!disposed && !operation.signal.aborted) {
@@ -752,16 +759,45 @@ export function createShareView(): ShareView {
   return {
     root,
     update,
-    cancelPending: () => pendingSource?.abort(),
+    cancelPending: () => { directStartVersion++; pendingSource?.abort(); if (!pendingSource) { preparing = false; syncControls(); } },
     updateDirectory(snapshot) {
       channels = (snapshot.servers ?? []).flatMap(server => server.channels.map(item => ({ serverId: server.id, serverName: server.name, channelId: item.id, channelName: item.name })));
-      const previous = channel?.channelId ?? preferredChannel;
-      channel = channels.find(item => item.channelId === previous) ?? channels[0] ?? null;
-      if (preparing && previous && !channels.some(item => item.channelId === previous)) pendingSource?.abort();
+      const previous = targetKey(channel) || preferredChannel;
+      if (channel && "sessionId" in channel) {
+        const session = snapshot.directSessions?.find(item => item.id === targetKey(channel));
+        if (!session || session.reconnecting) {
+          pendingSource?.abort();
+          if (!session && phase !== "idle") void stopShare().catch(error => alerts.replaceChildren(banner("error", errorText(error))));
+          if (!session) channel = null;
+        }
+      } else channel = channels.find(item => item.channelId === previous) ?? null;
+      if (preparing && previous && !(channel && "sessionId" in channel) && !channels.some(item => item.channelId === previous)) pendingSource?.abort();
       channelSelect.replaceChildren(...channels.map(item => el("option", { value: item.channelId, textContent: `${item.serverName} / ${item.channelName}` })));
-      if (channel) channelSelect.value = channel.channelId;
-      else channelSelect.append(el("option", { textContent: "Entre em um servidor para transmitir", value: "" }));
+      if (channel && "sessionId" in channel) channelSelect.prepend(el("option", { value: channel.sessionId, textContent: targetLabel(channel) }));
+      channelSelect.prepend(el("option", { value: "", textContent: "Escolha um canal ou abra Amigos" }));
+      channelSelect.value = targetKey(channel);
+
       syncControls();
+    },
+    startWithFriend(friend) {
+      if (phase !== "idle" || preparing) { alerts.replaceChildren(banner("info", "Pare a transmissão atual antes de mudar o público.")); return; }
+      if (!friend.online) { alerts.replaceChildren(banner("info", "Seu amigo está offline.")); return; }
+      const version = ++directStartVersion;
+      const consentToken = client.session?.token;
+      preparing = true; syncControls();
+      const current = () => !disposed && version === directStartVersion && client.session?.token === consentToken;
+      void (async () => {
+        const health = await client.request<{ capabilities?: string[] }>("GET", "/health", undefined, false);
+        if (!health.capabilities?.includes("direct-sessions")) throw new Error("O Hub precisa ser atualizado para compartilhar com amigos.");
+        if (!current()) return;
+        const result = await client.startDirect(friend.id);
+        if (!current()) return;
+        channel = { sessionId: result.sessionId, peerId: friend.id, peerName: friend.displayName };
+        channelSelect.prepend(el("option", { value: result.sessionId, textContent: targetLabel(channel) }));
+        channelSelect.value = result.sessionId;
+        preparing = false; syncControls();
+        await prepareSource(false);
+      })().catch(error => { if (current()) alerts.replaceChildren(banner("error", errorText(error))); }).finally(() => { if (version === directStartVersion && !pendingSource) { preparing = false; if (!disposed) syncControls(); } });
     },
     startInChannel(target) {
       if (phase !== "idle" || preparing) { alerts.replaceChildren(banner("info", "Pare o compartilhamento atual antes de iniciar em outro canal.")); return; }
@@ -774,6 +810,7 @@ export function createShareView(): ShareView {
     hide: closePreview,
     dispose() {
       disposed = true;
+      directStartVersion++;
       joinSound.dispose();
       pendingSource?.abort();
       optionsToken++;

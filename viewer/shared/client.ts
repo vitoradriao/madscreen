@@ -13,7 +13,11 @@ export interface LiveInfo {
   since: number;
   viewers: number;
   title: string | null;
+  destination?: StreamDestination;
 }
+export type StreamDestination = { kind: "channel"; channelId: string } | { kind: "direct"; sessionId: string };
+export interface InvitePreview { kind: "personal" | "server"; inviter: UserView; expiresAt: number; maxUses: number; uses: number; server?: { id: string; name: string }; channel?: { id: string; name: string } }
+export interface InviteView { code: string; kind: string; expires: number; max_uses: number; uses: number; revoked: number }
 export interface FriendView extends UserView {
   online: boolean;
   live: LiveInfo | null;
@@ -25,6 +29,9 @@ export interface Snapshot {
   outgoing: UserView[];
   servers?: ServerView[];
   destination?: InviteDestination;
+  inviter?: string;
+  inviteStatus?: "accepted" | "already_redeemed";
+  directSessions?: { id: string; peerId: string; reconnecting: boolean; declined: boolean }[];
 }
 export interface InviteDestination { serverId: string; serverName: string; channelId: string; channelName: string }
 export type MemberRole = "owner" | "admin" | "member";
@@ -163,7 +170,7 @@ export class MadClient {
       } catch {
         // Corpo sem JSON.
       }
-      if (response.status === 401 && auth && code === "sessao_invalida" && this.session === session) this.setSession(null);
+      if (response.status === 401 && auth && (code === "sessao_invalida" || code === "sessao_revogada") && this.session === session) this.setSession(null);
       throw new ApiFailure(response.status, code, message);
     }
     return (await response.json()) as T;
@@ -180,7 +187,7 @@ export class MadClient {
 
   async register(username: string, code: string, displayName?: string, signal?: AbortSignal) {
     code = rememberInvite(code, this.base) ?? "";
-    return this.adopt(await this.request<Session & { recoveryKey: string }>("POST", "/auth/register", { username, code, ...(displayName ? { displayName } : {}) }, false, signal), signal);
+    return this.adopt(await this.request<Session & { recoveryKey: string }>("POST", "/auth/register", { username, code, acceptInvite: true, ...(displayName ? { displayName } : {}) }, false, signal), signal);
   }
 
   async login(username: string, recoveryKey: string, signal?: AbortSignal) {
@@ -213,7 +220,8 @@ export class MadClient {
   }
 
   async logout(): Promise<void> {
-    if (this.token) await this.request("POST", "/api/logout", {});
+    // Sessão já encerrada pelo Worker (401): não há o que revogar, só esquecer o token local.
+    if (this.token) await this.request("POST", "/api/logout", {}).catch((error: unknown) => { if (!(error instanceof ApiFailure && error.status === 401)) throw error; });
     this.setSession(null);
   }
 
@@ -229,16 +237,28 @@ export class MadClient {
     const result = await this.request<{ account?: { recoveryKey?: boolean } }>("GET", "/api/me");
     return typeof result.account?.recoveryKey === "boolean" ? result.account.recoveryKey : null;
   }
-  rotateRecoveryKey = () => this.request<{ recoveryKey: string }>("POST", "/api/me/recovery-key", {});
+  rotateRecoveryKey = async () => {
+    const result = await this.request<{ recoveryKey: string; token?: string; exp?: number; user: UserView }>("POST", "/api/me/recovery-key", {});
+    // Worker antigo não devolve token; nesse caso a sessão atual segue valendo.
+    if (result.token && result.exp) this.setSession({ token: result.token, exp: result.exp, user: result.user });
+    return { recoveryKey: result.recoveryKey };
+  };
   friends = () => this.request<Snapshot>("GET", "/api/friends");
   requestFriend = (username: string) => this.request<Snapshot>("POST", "/api/friends/request", { username });
   acceptFriend = (id: string) => this.request<Snapshot>("POST", "/api/friends/accept", { id });
   declineFriend = (id: string) => this.request<Snapshot>("POST", "/api/friends/decline", { id });
   removeFriend = (id: string) => this.request<Snapshot>("DELETE", `/api/friends/${encodeURIComponent(id)}`);
-  createInvite = (serverId?: string, channelId?: string) => this.request<{ code: string; link: string; expiresAt: number; maxUses: number; destination?: InviteDestination }>("POST", "/api/invites", { serverId, channelId });
-  redeemInvite = (code: string) => this.request<Snapshot>("POST", "/api/invites/redeem", { code });
+  createInvite = (serverId?: string, channelId?: string) => this.request<{ code: string; link: string; expiresAt: number; maxUses: number; destination?: InviteDestination }>("POST", "/api/invites", { kind: serverId ? "server" : "personal", serverId, channelId });
+  listInvites = (serverId?: string) => this.request<InviteView[]>("GET", serverId ? `/api/servers/${encodeURIComponent(serverId)}/invites` : "/api/invites");
+  revokeInvite = (code: string) => this.request("DELETE", `/api/invites/${encodeURIComponent(code)}`);
+  startDirect = (peerId: string) => this.request<{ sessionId: string }>("POST", "/api/direct", { peerId });
+  endDirect = (sessionId: string) => this.request("DELETE", `/api/direct/${encodeURIComponent(sessionId)}`);
+  declineDirect = (sessionId: string) => this.request("POST", `/api/direct/${encodeURIComponent(sessionId)}/decline`, {});
+  transferServer = (serverId: string, memberId: string) => this.request<Snapshot>("POST", `/api/servers/${encodeURIComponent(serverId)}/owner`, { memberId });
+  removeMember = (serverId: string, memberId: string) => this.request<Snapshot>("DELETE", `/api/servers/${encodeURIComponent(serverId)}/members/${encodeURIComponent(memberId)}`);
+  redeemInvite = (code: string) => this.request<Snapshot>("POST", "/api/invites/redeem", { code, accept: true });
   previewInvite = (code: string) =>
-    this.request<{ inviter: UserView; expiresAt: number; server?: { id: string; name: string }; channel?: { id: string; name: string } }>("GET", `/api/invites/preview?code=${encodeURIComponent(inviteCodeFrom(code, this.base))}`, undefined, false);
+    this.request<InvitePreview>("GET", `/api/invites/preview?code=${encodeURIComponent(inviteCodeFrom(code, this.base))}`, undefined, !!this.session);
   servers = () => this.request<Snapshot>("GET", "/api/servers");
   createServer = (name: string) => this.request<Snapshot>("POST", "/api/servers", { name });
   renameServer = (serverId: string, name: string) => this.request<Snapshot>("PATCH", `/api/servers/${encodeURIComponent(serverId)}`, { name });
@@ -248,9 +268,13 @@ export class MadClient {
   removeChannel = (serverId: string, channelId: string) => this.request<Snapshot>("DELETE", `/api/servers/${encodeURIComponent(serverId)}/channels/${encodeURIComponent(channelId)}`);
   leaveServer = (serverId: string) => this.request<Snapshot>("DELETE", `/api/servers/${encodeURIComponent(serverId)}/members/me`);
   setMemberRole = (serverId: string, userId: string, role: "admin" | "member") => this.request<Snapshot>("PATCH", `/api/servers/${encodeURIComponent(serverId)}/members/${encodeURIComponent(userId)}`, { role });
-  async completeInvite(): Promise<Snapshot | null> {
+  async completeInvite(confirm: (preview: InvitePreview) => Promise<boolean>): Promise<Snapshot | null> {
     const code = pendingInvite();
+    const session = this.session;
     if (!code) return null;
+    const preview = await this.previewInvite(code);
+    if (!await confirm(preview)) { if (pendingInvite() === code) clearInvite(); return null; }
+    if (!session || this.session !== session || pendingInvite() !== code) return null;
     const result = await this.redeemInvite(code);
     if (pendingInvite() === code) clearInvite();
     return result;
@@ -288,12 +312,13 @@ export class MadClient {
           // Mensagem desconhecida.
         }
       };
-      ws.onclose = () => {
+      ws.onclose = (event: CloseEvent) => {
         clearInterval(ping);
         handlers.onState?.(false);
         if (closed) return;
         failures++;
-        if (failures >= 3) {
+        // 4001: o Worker encerrou a sessão (logout/conta removida); confirma já em vez de esperar 3 falhas.
+        if (failures >= 3 || event.code === 4001) {
           // Distingue rede fora do ar de sessão inválida.
           void this.me().catch((error: unknown) => {
             if (error instanceof ApiFailure && error.status === 401) handlers.onAuthLost?.();
@@ -325,6 +350,14 @@ export interface WatchStats {
   rttMs: number | null;
   jitterBufferMs: number | null;
   lossPct: number | null;
+}
+
+/** Codec recebido ("H264 42e01f"), sem o restante do fmtp. */
+function videoCodec(report: RTCStatsReport, inbound: RTCInboundRtpStreamStats): string | null {
+  const codec = inbound.codecId ? report.get(inbound.codecId) as RTCRtpCodec & { sdpFmtpLine?: string } | undefined : undefined;
+  if (typeof codec?.mimeType !== "string") return null;
+  const profile = /profile-level-id=([0-9a-f]{6})/i.exec(codec.sdpFmtpLine ?? "")?.[1];
+  return [codec.mimeType.replace(/^video\//i, ""), profile].filter(Boolean).join(" ");
 }
 
 /** RTT do transporte usado pelo vídeo; não confundir pares antigos com o selecionado. */
@@ -389,6 +422,43 @@ interface VideoDiagnosticSample {
   jitterBufferEmittedCount: number | null;
   totalDecodeTimeSeconds: number | null;
   documentHidden: boolean;
+  qpSum?: number | null;
+  keyFramesDecoded?: number | null;
+  codec?: string | null;
+  decoderImplementation?: string | null;
+}
+
+export interface VideoQuality {
+  windowSeconds: number | null;
+  qpAverage: number | null;
+  keyframesPerMinute: number | null;
+  pliPerMinute: number | null;
+  nackPerMinute: number | null;
+  codec: string | null;
+  decoder: string | null;
+}
+
+/** QP médio e eventos por minuto no último minuto do segmento atual; contador ausente ou que volta = null, nunca 0. */
+export function videoQuality(history: readonly VideoDiagnosticSample[], windowMs = 60_000): VideoQuality {
+  const last = history.at(-1);
+  const quality: VideoQuality = { windowSeconds: null, qpAverage: null, keyframesPerMinute: null, pliPerMinute: null, nackPerMinute: null, codec: last?.codec ?? null, decoder: last?.decoderImplementation ?? null };
+  const first = last && history.find(sample => sample.segment === last.segment && last.atMs - sample.atMs <= windowMs);
+  if (!last || !first || last.atMs <= first.atMs) return quality;
+  const minutes = (last.atMs - first.atMs) / 60_000;
+  const delta = (a: number | null | undefined, b: number | null | undefined): number | null =>
+    typeof a === "number" && typeof b === "number" && Number.isFinite(a) && Number.isFinite(b) && b >= a ? b - a : null;
+  const perMinute = (a: number | null | undefined, b: number | null | undefined): number | null => {
+    const value = delta(a, b);
+    return value === null ? null : value / minutes;
+  };
+  const frames = delta(first.framesDecoded, last.framesDecoded);
+  const qp = delta(first.qpSum, last.qpSum);
+  quality.windowSeconds = minutes * 60;
+  quality.qpAverage = frames && qp !== null ? qp / frames : null;
+  quality.keyframesPerMinute = perMinute(first.keyFramesDecoded, last.keyFramesDecoded);
+  quality.pliPerMinute = perMinute(first.pliCount, last.pliCount);
+  quality.nackPerMinute = perMinute(first.nackCount, last.nackCount);
+  return quality;
 }
 /** Pedido automático observado até a retomada do decode e da apresentação (sem inferir causalidade). */
 interface VideoRecoveryObservation {
@@ -438,6 +508,7 @@ export interface WatchSessionOptions {
   diagnostics?: boolean;
   audio?: boolean;
   preferredRid?: "h" | "m" | "l" | null;
+  destination?: StreamDestination;
 }
 
 function wait(ms: number, signal?: AbortSignal): Promise<void> {
@@ -565,6 +636,10 @@ export class WatchSession {
     }
   }
 
+  getQuality(): VideoQuality {
+    return videoQuality(this.diagnosticHistory);
+  }
+
   /** Últimas 60 amostras locais, sem tokens, SDP, IPs, nomes ou conteúdo de mídia. */
   getDiagnostics() {
     return {
@@ -573,6 +648,7 @@ export class WatchSession {
       samples: this.diagnosticSamples.map(sample => ({ ...sample })),
       history: this.diagnosticHistory.map(sample => ({ ...sample })),
       historyIntervalMs: 1000,
+      quality: videoQuality(this.diagnosticHistory),
       audioHistory: this.audioDiagnosticHistory.map(sample => ({ ...sample })),
       audioSamples: this.audioDiagnosticSamples.map(sample => ({ ...sample })),
       recoveries: this.recoveryObservations.map(item => ({
@@ -799,7 +875,7 @@ export class WatchSession {
             this.handlers.onState("error", error.message);
             return;
           }
-          if (error instanceof ApiFailure && ["camada_indisponivel", "cliente_desatualizado"].includes(error.code)) {
+          if (error instanceof ApiFailure && ["camada_indisponivel", "cliente_desatualizado", "destino_alterado"].includes(error.code)) {
             this.handlers.onState("error", error.message);
             return;
           }
@@ -828,7 +904,7 @@ export class WatchSession {
     const started = await this.client.request<{
       viewerId: string; generation: number; audio?: boolean;
     } & ({ provider?: "cloudflare"; offer: string } | { provider: "livekit"; livekit: LiveKitWatchConnection })>(
-      "POST", "/api/watch/start", { owner: this.owner, audio: this.audioEnabled, preferredRid: this.options.preferredRid ?? "h", providers: ["cloudflare", "livekit"] }, true, signal);
+      "POST", "/api/watch/start", { owner: this.owner, audio: this.audioEnabled, preferredRid: this.options.preferredRid ?? "h", providers: ["cloudflare", "livekit"], ...(this.options.destination ? { destination: this.options.destination } : {}) }, true, signal);
     if (signal.aborted || this.mediaAbort !== controller) void this.leaveViewer(started.viewerId);
     active();
     this.viewerId = started.viewerId;
@@ -1091,6 +1167,11 @@ export class WatchSession {
         jitterMs: stat.jitter === undefined ? null : stat.jitter * 1000,
         jitterBufferDelaySeconds: stat.jitterBufferDelay ?? null, jitterBufferEmittedCount: stat.jitterBufferEmittedCount ?? null,
         totalDecodeTimeSeconds: stat.totalDecodeTime ?? null, documentHidden: typeof document !== "undefined" && document.hidden,
+        qpSum: typeof stat.qpSum === "number" && Number.isFinite(stat.qpSum) ? stat.qpSum : null,
+        keyFramesDecoded: typeof stat.keyFramesDecoded === "number" && Number.isFinite(stat.keyFramesDecoded) ? stat.keyFramesDecoded : null,
+        codec: videoCodec(report, stat),
+        // Chrome só expõe com captura/tela cheia liberada; ausente vira "indisponível".
+        decoderImplementation: typeof stat.decoderImplementation === "string" ? stat.decoderImplementation : null,
       });
       if (this.diagnosticSamples.length > 60) this.diagnosticSamples.shift();
       const recent = this.diagnosticSamples.at(-1)!;

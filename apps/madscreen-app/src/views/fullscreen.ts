@@ -1,10 +1,26 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 
-/** Janela do Tauri junto com o elemento: o WebView2 sozinho deixa a moldura do app visível. */
+let wasMaximized = false;
+
+/**
+ * Janela do Tauri junto com o elemento: o WebView2 sozinho deixa a moldura do app visível.
+ * Janela sem moldura e maximizada mantém a área útil (sem a barra de tarefas) mesmo em tela cheia,
+ * deixando faixas pretas; por isso desmaximiza antes e maximiza de volta ao sair.
+ */
 async function setWindowFullscreen(on: boolean) {
   try {
-    await getCurrentWindow().setFullscreen(on);
+    const win = getCurrentWindow();
+    if (on) {
+      // `||`: um segundo pedido durante a transição não pode esquecer que estava maximizada.
+      wasMaximized = wasMaximized || (await win.isMaximized());
+      if (wasMaximized) await win.unmaximize();
+      await win.setFullscreen(true);
+    } else {
+      await win.setFullscreen(false);
+      if (wasMaximized) await win.maximize();
+      wasMaximized = false;
+    }
   } catch {
     /* fora do Tauri (vite dev) ou sem permissão: o fullscreen do elemento basta */
   }

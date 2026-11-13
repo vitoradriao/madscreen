@@ -20,3 +20,9 @@ O manifest normalizado foi preservado, removendo somente entradas de exemplos/te
 não distribuídos nesta cópia. Testes de regressão do anúncio de áudio ficam em
 `crates/madscreen-transport/src/lib.rs`. Remover o `[patch.crates-io]` e esta cópia quando
 uma versão upstream corrigida for adotada e passar no teste real de separação L/R.
+
+Em 13/nov/2026, `Room::request_publisher_bandwidth_probe` passou a expor um pedido de sondagem de
+banda no PeerConnection de publicação: alterna o teto de taxa do transporte (`SetBitrate`, sem
+`start_bitrate`). Depois de um pico de atraso o GCC sobe só por aumento aditivo (~50 kbps/s) e não
+sonda sozinho fora de ALR; um teto que sobe faz o `ProbeController` sondar. Medição em
+`docs/bench/` (relatório de 13/nov).

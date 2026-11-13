@@ -13,7 +13,7 @@ pelas dependências; cada componente mantém sua própria licença e seus avisos
 | AMD AMF, Intel oneVPL | MIT | Dispatcher/headers; o encoder em si é do driver do fabricante. |
 | NVIDIA Video Codec SDK (headers NVENC) | MIT | O encoder é do driver NVIDIA. |
 | libwebrtc (via LiveKit/webrtc-sys) | BSD-3-Clause | Pré-compilado do projeto LiveKit. |
-| LiveKit Rust SDK (`third_party/livekit`, `third_party/webrtc-sys`) | Apache-2.0 | Cópia com modificações; ver os avisos nas pastas. |
+| LiveKit Rust SDK (`third_party/livekit`, `third_party/libwebrtc`, `third_party/webrtc-sys`) | Apache-2.0 | Cópia com modificações; ver os avisos nas pastas. |
 | Cisco OpenH264 (opcional) | BSD-2-Clause | Somente o binário oficial da Cisco cobre royalties AVC; uma DLL compilada localmente não. |
 
 ## Crates Rust (Windows)
@@ -175,7 +175,6 @@ pelas dependências; cada componente mantém sua própria licença e seus avisos
 | lazy_static | 1.5.1 | MIT OR Apache-2.0 |
 | libc | 0.2.191 | MIT OR Apache-2.0 |
 | libloading | 0.8.9 | ISC |
-| libwebrtc | 0.3.55 | Apache-2.0 |
 | link-cplusplus | 1.0.12 | MIT OR Apache-2.0 |
 | litemap | 0.8.3 | Unicode-3.0 |
 | livekit-api | 0.10.0 | Apache-2.0 |

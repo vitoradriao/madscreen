@@ -11,11 +11,13 @@ const bundle = await build({ stdin: { contents: 'export { HubDO, default as work
 } }] });
 const { HubDO, worker, signSession } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`);
 globalThis.WebSocketRequestResponsePair = class {};
+WebSocket.READY_STATE_OPEN = WebSocket.OPEN;
 
 function database() {
   const db = new DatabaseSync(":memory:");
   let transactionId = 0;
   const storage = {
+    getAlarm: async () => null, setAlarm: async () => {},
     sql: { exec(query, ...args) {
       let rows = [];
       if (!args.length && query.trim().split(";").filter(part => part.trim()).length > 1) db.exec(query);
@@ -29,13 +31,14 @@ function database() {
       catch (error) { db.exec(`ROLLBACK TO ${name}; RELEASE ${name}`); throw error; }
     },
   };
-  const ctx = { storage, getWebSockets: () => [], setWebSocketAutoResponse() {} };
+  const sockets = [];
+  const ctx = { storage, getWebSockets: tag => sockets.filter(socket => socket.tag === tag), setWebSocketAutoResponse() {} };
   const media = [];
   const stream = { forceStop: async uid => { media.push(["stop", uid]); }, revokeViewer: async uid => { media.push(["revoke", uid]); }, fetch: async request => { media.push(["forward", request.headers.get("x-ms-owner"), request.headers.get("x-ms-channel"), request.headers.has("Authorization")]); return Response.json({ ok: true }); } };
   const env = { SESSION_SECRET: "local-fixture-secret-never-used-in-production", HUB: { idFromName: name => name, get: () => hub }, STREAM: { idFromName: name => name, get: () => stream } };
   let hub;
   const open = () => { hub = new HubDO(ctx, env); return hub; };
-  return { db, storage, env, media, open, get hub() { return hub; } };
+  return { db, storage, env, media, sockets, open, get hub() { return hub; } };
 }
 const failure = code => error => error?.code === code;
 
@@ -55,7 +58,7 @@ test("Discord mantém identidade entre clientes e reinício; callback e PKCE sã
     await hub.oauthFinish(second, "discord", { ...profile, username: "changed_name", avatar: "https://cdn.discordapp.com/new.png" });
     assert.equal(await hub.exchange("client-two"), uid);
     assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM identities WHERE provider='discord'").get().n, 1);
-    assert.equal((await hub.me(uid)).avatar, "https://cdn.discordapp.com/new.png");
+    assert.equal((await hub.me(uid)).user.avatar, "https://cdn.discordapp.com/new.png");
   } finally { f.db.close(); }
 });
 
@@ -79,7 +82,9 @@ async function oauth(hub, name, invite = null) {
   const challenge = `challenge-${name}`;
   const state = await hub.oauthBegin("discord", challenge, invite);
   await hub.oauthFinish(state, "discord", profile(name));
-  return hub.exchange(challenge);
+  const uid = await hub.exchange(challenge);
+  if (invite) await hub.redeemInvite(uid, "oauth-fixture", invite);
+  return uid;
 }
 async function api(fixture, uid, method, path, body) {
   const { token } = await signSession(uid, fixture.env.SESSION_SECRET);
@@ -134,6 +139,8 @@ test("convite entra no canal, é idempotente e preserva identidade OAuth", async
   await assert.rejects(hub.redeemInvite(bob, "local", guestInvite.code), failure("convite_expirado"));
   await assert.rejects(hub.previewInvite("local", "ZZZZ-ZZZZ"), failure("convite_invalido"));
   await hub.changeDirectory(alice, "role", destination.serverId, "admin", bob);
+  await assert.rejects(hub.changeDirectory(alice, "leave", destination.serverId), failure("transfira_propriedade"));
+  await hub.changeDirectory(alice, "transfer", destination.serverId, undefined, bob);
   await hub.changeDirectory(alice, "leave", destination.serverId);
   const inherited = (await hub.directorySnapshot(bob)).servers.find(server => server.id === destination.serverId);
   assert.equal(inherited.ownerId, bob);
@@ -156,7 +163,7 @@ test("permissões, publicação, isolamento e revogação usam o servidor do can
   assert.equal(await hub.setLive(bob, { channelId: channel.id, since: 1, viewers: 0, title: "Jogo" }), true);
   assert.equal((await hub.canWatch(alice, "bob")).ownerId, bob);
   await hub.requestFriend(carol, "bob"); await hub.answerRequest(bob, carol, true);
-  const other = (await hub.directorySnapshot(carol)).servers[0];
+  const other = (await hub.changeDirectory(carol, "create", "", "Carol")).snapshot.servers[0];
   const otherInvite = await hub.createInvite(carol, other.id, other.channels[0].id);
   await hub.redeemInvite(bob, "local", otherInvite.code);
   // Outro servidor em comum e um heartbeat antigo não concedem acesso ao canal privado.
@@ -245,9 +252,15 @@ test("troca da chave de recuperacao invalida a antiga e nao vale para conta OAut
     const { token } = await signSession(uid, f.env.SESSION_SECRET);
     const call = (method, path) => worker.fetch(new Request(`https://worker.example.com${path}`, { method, headers: { Authorization: `Bearer ${token}` } }), f.env);
     assert.deepEqual((await (await call("GET", "/api/me")).json()).account, { recoveryKey: true });
+    const older = (await signSession(uid, f.env.SESSION_SECRET, Math.floor(Date.now() / 1000) - 10)).token;
+    const closes = [];
+    f.sockets.push({ tag: `u:${uid}`, close: (code, reason) => closes.push([code, reason]) }, { tag: "u:outro", close: () => closes.push("indevido") });
     const rotated = await call("POST", "/api/me/recovery-key");
     assert.equal(rotated.status, 200);
-    const { recoveryKey: next } = await rotated.json();
+    assert.deepEqual(closes, [[4001, "sessao encerrada"]]);
+    const { recoveryKey: next, token: renewed } = await rotated.json();
+    assert.equal((await worker.fetch(new Request("https://worker.example.com/api/me", { headers: { Authorization: `Bearer ${older}` } }), f.env)).status, 401);
+    assert.equal((await worker.fetch(new Request("https://worker.example.com/api/me", { headers: { Authorization: `Bearer ${renewed}` } }), f.env)).status, 200);
     assert.match(next, /^[A-Z0-9]{5}(-[A-Z0-9]{5}){3}$/);
     assert.notEqual(next, recoveryKey);
     await assert.rejects(hub.login("127.0.0.1", "rotation_fixture", recoveryKey), failure("credenciais_invalidas"));
@@ -258,4 +271,159 @@ test("troca da chave de recuperacao invalida a antiga e nao vale para conta OAut
     assert.deepEqual((await (await oauthCall("GET", "/api/me")).json()).account, { recoveryKey: false });
     assert.equal((await oauthCall("POST", "/api/me/recovery-key")).status, 409);
   } finally { f.db.close(); }
+});
+
+
+function online(f, uid) {
+  const socket = { tag: `u:${uid}`, readyState: 1, send() {}, close() { this.readyState = 3; } };
+  f.sockets.push(socket); return socket;
+}
+
+test("convite pessoal: cadastro sem servidor, concorrência, repetição e relação removida", async () => {
+  const f = database();
+  try {
+    const hub = f.open(), ana = await oauth(hub, "ana");
+    assert.equal((await hub.friends(ana)).servers.length, 0);
+    const invite = await hub.createInvite(ana, undefined, undefined, "personal");
+    assert.equal(invite.maxUses, 1); assert.equal(invite.kind, "personal");
+    const preview = await hub.previewInvite("preview", invite.code);
+    assert.equal(preview.server, undefined); assert.equal(preview.kind, "personal");
+    const results = await Promise.allSettled([hub.register("reg-a", "bruno", invite.code), hub.register("reg-b", "carla", invite.code)]);
+    assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+    const bruno = results.find(result => result.status === "fulfilled").value.uid;
+    let snapshot = await hub.friends(bruno);
+    assert.equal(snapshot.friends.length, 1); assert.equal(snapshot.friends[0].id, ana); assert.equal(snapshot.servers.length, 0);
+    await hub.redeemInvite(bruno, "repeat", invite.code);
+    assert.equal(f.db.prepare("SELECT uses FROM invites WHERE code = ?").get(invite.code).uses, 1);
+    await hub.removeFriend(bruno, ana);
+    snapshot = await hub.redeemInvite(bruno, "repeat", invite.code);
+    assert.equal(snapshot.friends.length, 0); assert.equal(snapshot.servers.length, 0);
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM users").get().n, 2);
+  } finally { f.db.close(); }
+});
+
+test("OAuth mantém convite para aceite explícito; pessoal e servidor nunca misturam efeitos", async () => {
+  const f = database();
+  try {
+    const hub = f.open(), ana = await oauth(hub, "ana");
+    const personal = await hub.createInvite(ana, undefined, undefined, "personal");
+    const state = await hub.oauthBegin("discord", "bruno-login", personal.code);
+    await hub.oauthFinish(state, "discord", profile("bruno"));
+    const bruno = await hub.exchange("bruno-login");
+    assert.equal((await hub.friends(bruno)).friends.length, 0);
+    await assert.rejects(hub.redeemInvite(ana, "self", personal.code), failure("convite_proprio"));
+    await hub.redeemInvite(bruno, "accept", personal.code);
+    assert.equal((await hub.friends(bruno)).servers.length, 0);
+    const d = (await hub.changeDirectory(ana, "create", "", "Squad")).snapshot.destination;
+    const server = await hub.createInvite(ana, d.serverId, d.channelId);
+    const carla = await oauth(hub, "carla"); await hub.redeemInvite(carla, "accept", server.code);
+    assert.equal((await hub.friends(carla)).friends.length, 0);
+    await hub.changeDirectory(carla, "leave", d.serverId);
+    assert.equal((await hub.redeemInvite(carla, "repeat", server.code)).servers.length, 0);
+    await hub.revokeInvite(ana, personal.code);
+    await assert.rejects(hub.redeemInvite(bruno, "revoked", personal.code), failure("convite_revogado"));
+    const expired = await hub.createInvite(ana, undefined, undefined, "personal");
+    const pending = await hub.oauthBegin("discord", "expired-login", expired.code);
+    f.db.prepare("UPDATE invites SET expires=1 WHERE code=?").run(expired.code);
+    await hub.oauthFinish(pending, "discord", profile("dora"));
+    const dora = await hub.exchange("expired-login");
+    await assert.rejects(hub.redeemInvite(dora, "expired", expired.code), failure("convite_expirado"));
+    assert.equal((await hub.friends(dora)).friends.length, 0);
+  } finally { f.db.close(); }
+});
+
+test("sessão privada: terceiro do mesmo servidor é recusado, snapshots filtram e remoção revoga ambos", async () => {
+  const f = database();
+  try {
+    const hub = f.open(), ana = await oauth(hub, "ana"), bruno = await oauth(hub, "bruno"), carla = await oauth(hub, "carla");
+    await hub.requestFriend(ana, "bruno"); await hub.answerRequest(bruno, ana, true);
+    await hub.requestFriend(ana, "carla"); await hub.answerRequest(carla, ana, true);
+    await assert.rejects(hub.startDirect(ana, bruno), failure("amigo_offline"));
+    online(f, ana); online(f, bruno); online(f, carla);
+    const { sessionId } = await hub.startDirect(ana, bruno);
+    assert.equal((await hub.startDirect(bruno, ana)).sessionId, sessionId);
+    const destination = { kind: "direct", sessionId };
+    await hub.setLive(ana, { destination, since: 1, viewers: 1, title: "Privada" });
+    assert.equal((await hub.friends(bruno)).friends.find(friend => friend.id === ana).live.title, "Privada");
+    // Sem o destino o espectador recebe destino_alterado ao assistir por Amigos.
+    assert.deepEqual((await hub.friends(bruno)).friends.find(friend => friend.id === ana).live.destination, destination);
+    assert.equal((await hub.friends(carla)).friends.find(friend => friend.id === ana).live, null);
+    assert.equal((await hub.friends(carla)).directSessions.length, 0);
+    const d = (await hub.changeDirectory(ana, "create", "", "Comum")).snapshot.destination;
+    const invite = await hub.createInvite(ana, d.serverId, d.channelId); await hub.redeemInvite(carla, "join", invite.code);
+    await assert.rejects(hub.canWatch(carla, ana), failure("sessao_privada_encerrada"));
+    await assert.rejects(hub.canWatch(carla, ana, destination), failure("sessao_privada_encerrada"));
+    assert.equal((await hub.friends(carla)).servers[0].channels[0].live.length, 0);
+    await hub.declineDirect(bruno, sessionId);
+    assert.equal((await hub.friends(bruno)).directSessions[0].declined, true);
+    await hub.removeFriend(ana, bruno);
+    await assert.rejects(hub.resolveShare(ana, destination), failure("sessao_privada_encerrada"));
+    await assert.rejects(hub.canWatch(bruno, ana, destination), failure("sessao_privada_encerrada"));
+    assert.equal(f.db.prepare("SELECT cleanup FROM direct_sessions WHERE id=?").get(sessionId).cleanup, 1);
+    assert.equal((await hub.friends(carla)).servers.length, 1);
+  } finally { f.db.close(); }
+});
+
+test("destino ausente falha sem criar servidor e cliente antigo recebe atualização explícita", async () => {
+  const f = database();
+  try {
+    const hub = f.open(), uid = await oauth(hub, "ana");
+    await assert.rejects(hub.resolveShare(uid), failure("destino_obrigatorio"));
+    const response = await api(f, uid, "POST", "/api/share/start", {});
+    assert.equal(response.status, 409); assert.equal((await response.json()).error, "destino_obrigatorio");
+    assert.equal(await hub.setLive(uid, { since: 1, viewers: 0, title: null }), false);
+    assert.equal((await hub.friends(uid)).servers.length, 0);
+    assert.equal((await api(f, uid, "POST", "/api/invites/redeem", {code:"ABCD-EFGH"})).status, 400);
+  } finally { f.db.close(); }
+});
+
+test("reconexão permite 29 segundos, expira aos 30 e nunca revive geração antiga", async () => {
+  const f = database(), originalNow = Date.now;
+  let time = originalNow(); Date.now = () => time;
+  try {
+    const hub = f.open(), ana = await oauth(hub, "ana"), bruno = await oauth(hub, "bruno");
+    await hub.requestFriend(ana, "bruno"); await hub.answerRequest(bruno, ana, true);
+    online(f, ana); const socket = online(f, bruno);
+    const {sessionId} = await hub.startDirect(ana, bruno), target = {kind:"direct",sessionId};
+    socket.close(); hub.direct.presence(bruno); time += 29000;
+    await hub.canWatch(bruno, ana, target);
+    await assert.rejects(hub.resolveShare(ana, target, true), failure("amigo_offline"));
+    online(f, bruno); hub.direct.presence(bruno); time += 2000;
+    await hub.canWatch(bruno, ana, target);
+    f.sockets.filter(socket => socket.tag === `u:${bruno}`).forEach(socket => socket.close());
+    hub.direct.presence(bruno); time += 30000;
+    await assert.rejects(hub.canWatch(bruno, ana, target), failure("sessao_privada_encerrada"));
+    online(f, bruno); hub.direct.presence(bruno);
+    const next = await hub.startDirect(ana, bruno); assert.notEqual(next.sessionId, sessionId);
+    await assert.rejects(hub.canWatch(bruno, ana, target), failure("sessao_privada_encerrada"));
+  } finally { Date.now = originalNow; f.db.close(); }
+});
+
+
+test("matriz dono/admin/membro, transferência explícita e revogação de convites", async () => {
+  const f = database();
+  try {
+    const hub=f.open(), owner=await oauth(hub,"dono"), admin=await oauth(hub,"admin_user"), member=await oauth(hub,"membro"), otherAdmin=await oauth(hub,"admin_dois");
+    const d=(await hub.changeDirectory(owner,"create","","Squad")).snapshot.destination;
+    const invite=await hub.createInvite(owner,d.serverId,d.channelId);
+    for(const uid of [admin,member,otherAdmin])await hub.redeemInvite(uid,"join",invite.code);
+    await hub.changeDirectory(owner,"role",d.serverId,"admin",admin);await hub.changeDirectory(owner,"role",d.serverId,"admin",otherAdmin);
+    await assert.rejects(hub.changeDirectory(admin,"rename",d.serverId,"Outro"),failure("sem_permissao"));
+    await assert.rejects(hub.changeDirectory(admin,"role",d.serverId,"member",otherAdmin),failure("sem_permissao"));
+    await assert.rejects(hub.changeDirectory(admin,"kick",d.serverId,undefined,otherAdmin),failure("sem_permissao"));
+    await assert.rejects(hub.changeDirectory(member,"channel_create",d.serverId,"Canal"),failure("sem_permissao"));
+    await assert.rejects(hub.createInvite(member,d.serverId),failure("sem_permissao"));
+    await hub.changeDirectory(admin,"channel_create",d.serverId,"Canal");
+    await hub.changeDirectory(admin,"kick",d.serverId,undefined,member);
+    assert.equal((await hub.friends(member)).servers.length,0);
+    await hub.revokeInvite(admin,invite.code);
+    await assert.rejects(hub.redeemInvite(member,"revoked",invite.code),failure("convite_revogado"));
+    await assert.rejects(hub.changeDirectory(owner,"leave",d.serverId),failure("transfira_propriedade"));
+    await assert.rejects(hub.changeDirectory(admin,"transfer",d.serverId,undefined,otherAdmin),failure("sem_permissao"));
+    await hub.changeDirectory(owner,"transfer",d.serverId,undefined,admin);
+    assert.equal((await hub.friends(admin)).servers[0].role,"owner");
+    await hub.changeDirectory(owner,"leave",d.serverId);
+    await hub.changeDirectory(admin,"remove",d.serverId);
+    assert.equal((await hub.friends(otherAdmin)).servers.length,0);
+  }finally{f.db.close();}
 });

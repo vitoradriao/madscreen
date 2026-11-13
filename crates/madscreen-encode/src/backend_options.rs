@@ -26,7 +26,7 @@ pub(crate) fn backend_options(
     let options = match kind {
         BackendKind::Amf => vec![
             ("usage", "ultralowlatency"),
-            ("quality", "speed"),
+            ("quality", "balanced"),
             ("rc", "cbr"),
             ("preanalysis", "0"),
             // FFmpeg 8.1.2 amfenc.c: sem LOW_DELAY retém a saída mesmo sem B-frames.
@@ -87,16 +87,17 @@ pub(crate) fn backend_options(
             ("tune", "zerolatency"),
             ("forced-idr", "1"),
             (
+                // ultrafast desliga o deblocking (blocos visíveis); 0,0 o religa com o padrão do x264.
                 "x264-params",
                 match config.h264_profile {
                     H264Profile::ConstrainedBaseline => {
-                        "repeat-headers=1:annexb=1:scenecut=0:sliced-threads=1:cabac=0:8x8dct=0"
+                        "repeat-headers=1:annexb=1:scenecut=0:sliced-threads=1:cabac=0:8x8dct=0:deblock=0,0"
                     }
                     H264Profile::Main => {
-                        "repeat-headers=1:annexb=1:scenecut=0:sliced-threads=1:cabac=1:8x8dct=0"
+                        "repeat-headers=1:annexb=1:scenecut=0:sliced-threads=1:cabac=1:8x8dct=0:deblock=0,0"
                     }
                     H264Profile::High => {
-                        "repeat-headers=1:annexb=1:scenecut=0:sliced-threads=1:cabac=1:8x8dct=1"
+                        "repeat-headers=1:annexb=1:scenecut=0:sliced-threads=1:cabac=1:8x8dct=1:deblock=0,0"
                     }
                 },
             ),
@@ -275,7 +276,7 @@ mod tests {
                 BackendKind::Amf,
                 &[
                     ("usage", "ultralowlatency"),
-                    ("quality", "speed"),
+                    ("quality", "balanced"),
                     ("rc", "cbr"),
                     ("preanalysis", "0"),
                     ("flags", "+low_delay"),
@@ -372,7 +373,7 @@ mod tests {
                 .iter()
                 .find(|(k, _)| *k == "x264-params")
                 .map(|(_, v)| v.as_str());
-            assert_eq!(params, Some(format!("repeat-headers=1:annexb=1:scenecut=0:sliced-threads=1:cabac={cabac}:8x8dct={dct}").as_str()));
+            assert_eq!(params, Some(format!("repeat-headers=1:annexb=1:scenecut=0:sliced-threads=1:cabac={cabac}:8x8dct={dct}:deblock=0,0").as_str()));
         }
     }
     #[test]

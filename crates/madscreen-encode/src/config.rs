@@ -277,6 +277,11 @@ pub fn compat_tuning_enabled() -> bool {
 pub fn effective_config(kind: BackendKind, requested: &EncoderConfig) -> EncoderConfig {
     let mut effective = requested.clone();
     effective.async_readback = false;
+    // Live real com AMF (RX 9070 XT, 12/nov): o Map síncrono levou 25–55 ms com o jogo na GPU e
+    // a live ficou em 28–45 FPS; com o Map em ~2,5 ms voltou a 60. `--no-async-readback` desliga.
+    if requested.compat_tuning && kind == BackendKind::Amf {
+        effective.async_readback = requested.async_readback_override.unwrap_or(true);
+    }
     if requested.compat_tuning && compatibility_backend(kind) {
         effective.async_readback = requested.async_readback_override.unwrap_or(true);
         if matches!(kind, BackendKind::X264 | BackendKind::Qsv) {
@@ -296,8 +301,14 @@ mod tests {
         for kind in [BackendKind::Nvenc, BackendKind::Amf] {
             let effective = effective_config(kind, &base);
             assert_eq!(effective.vbv_frames, base.vbv_frames);
-            assert!(!effective.async_readback);
+            assert_eq!(effective.async_readback, kind == BackendKind::Amf);
         }
+        let amf_opt_out = EncoderConfig {
+            async_readback_override: Some(false),
+            ..base.clone()
+        };
+        assert!(!effective_config(BackendKind::Amf, &amf_opt_out).async_readback);
+        assert!(!effective_config(BackendKind::Nvenc, &amf_opt_out).async_readback);
         for kind in [BackendKind::X264, BackendKind::Qsv] {
             let mut effective = effective_config(kind, &base);
             assert_eq!(effective.vbv_frames, 4);
@@ -319,6 +330,7 @@ mod tests {
             ..base.clone()
         };
         for kind in [
+            BackendKind::Amf,
             BackendKind::X264,
             BackendKind::Qsv,
             BackendKind::Mf,

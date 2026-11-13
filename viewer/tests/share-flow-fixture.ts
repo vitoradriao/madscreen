@@ -28,6 +28,7 @@ export async function checkShareFlow(check: (condition: unknown, name: string) =
   const pickButton = (text: string) => [...document.querySelectorAll<HTMLButtonElement>('.pk-dialog button')].find(item => item.textContent === text)!;
   try {
     view.updateDirectory({ servers: [{ id: "server", name: "Teste", channels: [{ id: "channel", name: "Geral" }] }] } as any);
+    { const audience=view.root.querySelector<HTMLSelectElement>('select[aria-label="Canal da transmissão"]')!; audience.value="channel"; audience.dispatchEvent(new Event("change")); }
     await flush();
     check(view.root.querySelectorAll('.share-step').length === 3 && button("Compartilhar tela").disabled && !view.root.querySelector<HTMLDetailsElement>('.share-diagnostics')!.open, "Três passos visíveis; compartilhar exige fonte e diagnóstico começa recolhido");
     check(view.root.querySelector<HTMLElement>('.share-stage')!.hidden && view.root.querySelector<HTMLDetailsElement>('.share-quality')!.hidden,
@@ -105,6 +106,16 @@ export async function checkShareFlow(check: (condition: unknown, name: string) =
       canceled.cancelPending();await flush();
       check(!document.querySelector('.pk-overlay') && starts.length === 3, "Logout ou updater aborta a escolha rápida sem transmissão tardia");
     } finally { canceled.dispose?.();canceled.root.remove(); }
+    const direct = createShareView(); document.body.append(direct.root);
+    const originalRequest = client.request;
+    try {
+      client.request = async (_method, path) => (path === "/health" ? {capabilities:["direct-sessions"]} : {sessionId:"d_fixture"}) as any;
+      direct.startWithFriend({id:"friend",username:"friend",displayName:"Bruno",avatar:null,online:true,live:null}); await flush();
+      document.querySelector<HTMLButtonElement>(".pk-card")!.click(); await flush();
+      check(starts.length === 3 && direct.root.textContent?.includes("Somente Bruno poderá assistir"), "Destino privado aparece antes de confirmar, sem captura automática");
+      [...direct.root.querySelectorAll<HTMLButtonElement>("button")].find(button=>button.textContent === "Compartilhar")!.click(); await flush();
+      check(starts.length === 4 && starts[3].directSessionId === "d_fixture" && starts[3].channelId === null, "App envia sessão privada explícita ao supervisor sem canal inferido");
+    } finally { client.request = originalRequest; direct.dispose?.(); direct.root.remove(); }
   } finally {
     view.dispose?.();view.root.remove();
     (window as any).__TAURI_INTERNALS__ = internals; client.session = session;

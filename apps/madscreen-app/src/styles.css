@@ -13,7 +13,7 @@ body { overflow: hidden; display: flex; flex-direction: column; }
 .titlebar-btn { all: unset; box-sizing: border-box; display: grid; place-items: center; width: 46px; height: 100%; color: var(--text-2); cursor: default; transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease); }
 .titlebar-btn svg { width: 10px; height: 10px; pointer-events: none; }
 .titlebar-btn:hover { background: var(--surface-3); color: var(--text); }
-.titlebar-btn.close:hover { background: #e81123; color: #fff; }
+.titlebar-btn.close:hover { background: var(--accent); color: var(--accent-fg); }
 .titlebar-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 
 /* ---- estrutura ---- */

@@ -271,19 +271,7 @@ impl Session {
         // Por último: o usage ultralowlatency do AMF volta o perfil para Main se vier depois.
         set(
             "profile",
-            match (kind, config.h264_profile) {
-                (BackendKind::Mf, crate::config::H264Profile::ConstrainedBaseline) => "66",
-                (BackendKind::Mf, crate::config::H264Profile::Main) => "77",
-                (BackendKind::Mf, _) => "100",
-                (BackendKind::OpenH264, crate::config::H264Profile::ConstrainedBaseline) => {
-                    "constrained_baseline"
-                }
-                (BackendKind::OpenH264, crate::config::H264Profile::Main) => "main",
-                (BackendKind::OpenH264, _) => "high",
-                (_, crate::config::H264Profile::ConstrainedBaseline) => "baseline",
-                (_, crate::config::H264Profile::Main) => "main",
-                _ => "high",
-            },
+            crate::backend::ffmpeg_h264_profile_value(kind, config.h264_profile),
         )?;
         // libopenh264 não lê `level`: o nível real vem do SPS e é lido pelo frame de prova.
         if let Some(level) = config.h264_level.filter(|_| kind != BackendKind::OpenH264) {
@@ -990,6 +978,7 @@ impl FfmpegEncoder {
             output.timing = pending.timing;
             output.timing.qpc_encode_end = qpc()?;
             output.index = pending.index;
+            output.qp = None;
             output.kind = if crate::bitstream::inspect_annex_b(VideoCodec::H264, &output.data).key {
                 FrameKind::Key
             } else {

@@ -11,6 +11,11 @@
 /// Cada repetição gasta cerca de um quadro de orçamento: 30 equivalem a 1 s de taxa a 30 FPS.
 /// QuickSync/AMF/NVENC: não medido [VERIFICAR].
 pub const REFINE_FRAMES: u32 = 30;
+/// Teto de repetições por IDR quando a imagem ainda converge. No NVENC a 4 Mbps o texto parado só
+/// passa de 40 dB depois de ~92 quadros (`docs/bench/idr-convergencia-2026-11-07.md`); 30 deixam
+/// cerca de 29 dB, com blocos visíveis. 90 são 1,5 s a 60 Hz de taxa cheia em tela parada: o
+/// limite evita uma rajada longa para viewers lentos, já que qualquer PLI recomeça o refino.
+pub const MAX_REFINE_FRAMES: u32 = 90;
 /// Com a imagem já refinada, uma repetição periódica mantém a entrega abaixo do keepalive da
 /// Cloudflare (10 s, `KEEPALIVE_INTERVAL`), que senão reenviaria o IDR antigo e desfaria o refino.
 pub const SETTLED_REPEAT_MS: u64 = 5000;
@@ -24,6 +29,8 @@ pub struct StaticRefine {
     settled: bool,
     requested_at_ms: Option<u64>,
     content_since_keyframe: bool,
+    /// Repetições entregues desde o último IDR.
+    repeats: u32,
     /// Repetições entregues desde o início, para o diagnóstico.
     pub frames: u64,
 }
@@ -41,8 +48,10 @@ impl StaticRefine {
             self.remaining = REFINE_FRAMES;
             self.settled = false;
             self.content_since_keyframe = false;
+            self.repeats = 0;
         } else if refinement {
             self.frames += 1;
+            self.repeats += 1;
             self.settled = self.remaining == 0;
         } else {
             // Conteúdo novo: o refino perde sentido até o próximo IDR.
@@ -51,6 +60,23 @@ impl StaticRefine {
             self.content_since_keyframe = true;
         }
         refinement
+    }
+
+    /// Chamar depois de uma repetição aceita. Uma repetição que ainda gasta pelo menos 1/8 do
+    /// orçamento do quadro indica imagem em convergência: mais uma, até `MAX_REFINE_FRAMES`.
+    pub fn keep_going_if_spending(&mut self, au_bytes: usize, frame_budget_bytes: usize) {
+        if self.remaining == 0
+            && self.repeats < MAX_REFINE_FRAMES
+            && au_bytes.saturating_mul(8) >= frame_budget_bytes.max(1)
+        {
+            self.remaining = 1;
+            self.settled = false;
+        }
+    }
+
+    /// Há repetições pendentes: o laço de captura precisa acordar no ritmo do refino.
+    pub fn active(&self) -> bool {
+        self.remaining > 0
     }
 
     /// Delta de conteúdo real depois do último IDR; repetições não contam.
@@ -119,6 +145,44 @@ mod tests {
         // IDR de PLI/keepalive recomeça o refino.
         refine.on_access_unit(true);
         assert_eq!(drain(&mut refine, 5000, 33).0, REFINE_FRAMES);
+    }
+
+    #[test]
+    fn refinement_continues_while_frames_are_spending_and_stops_when_converged() {
+        let mut refine = StaticRefine::new();
+        refine.on_access_unit(true);
+        let (mut now, mut repeats) = (0, 0);
+        // Repetições gastam metade do orçamento (imagem convergindo) até a 60ª; depois, 20 B.
+        for _ in 0..10_000 {
+            now += 40;
+            if refine.wants(now, 40, 33, false) {
+                assert!(refine.on_access_unit(false));
+                repeats += 1;
+                refine.keep_going_if_spending(if repeats <= 60 { 500 } else { 20 }, 1000);
+            }
+            if refine.settled {
+                break;
+            }
+        }
+        assert_eq!(
+            repeats, 61,
+            "continua até o primeiro quadro que quase não gasta"
+        );
+        // Sempre gastando: o teto limita.
+        refine.on_access_unit(true);
+        let mut repeats = 0;
+        for _ in 0..10_000 {
+            now += 40;
+            if refine.wants(now, 40, 33, false) {
+                refine.on_access_unit(false);
+                repeats += 1;
+                refine.keep_going_if_spending(500, 1000);
+            }
+            if refine.settled {
+                break;
+            }
+        }
+        assert_eq!(repeats, MAX_REFINE_FRAMES);
     }
 
     #[test]

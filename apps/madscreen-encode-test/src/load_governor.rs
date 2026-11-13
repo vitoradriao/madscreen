@@ -5,6 +5,17 @@
 pub enum ResolutionStep {
     Native,
     Hd720,
+    Hd540,
+}
+impl ResolutionStep {
+    /// Altura de saída; `None` mantém a do degrau nativo.
+    pub fn height(self) -> Option<u32> {
+        match self {
+            Self::Native => None,
+            Self::Hd720 => Some(720),
+            Self::Hd540 => Some(540),
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChangeReason {
@@ -80,11 +91,14 @@ pub struct LoadGovernor {
     rate_retry_ms: u64,
 }
 impl LoadGovernor {
-    pub fn new(configured_fps: u32, can_reduce_to_720: bool, at_ms: u64) -> Self {
+    pub fn new(configured_fps: u32, can_reduce_resolution: bool, at_ms: u64) -> Self {
         let initial = configured_fps.max(15);
+        // Com espaço para reduzir, a resolução vem antes dos FPS baixos: no lab #15 o 1080p
+        // ficou em 10 FPS com 128 s de freeze e o 540p manteve 60 FPS sem freeze.
+        let fps_floor = if can_reduce_resolution { 30 } else { 15 };
         let mut rates = vec![initial];
         for fps in [60, 30, 20, 15] {
-            if fps < initial && !rates.contains(&fps) {
+            if fps < initial && fps >= fps_floor && !rates.contains(&fps) {
                 rates.push(fps);
             }
         }
@@ -95,11 +109,14 @@ impl LoadGovernor {
                 resolution: ResolutionStep::Native,
             })
             .collect();
-        if can_reduce_to_720 {
-            steps.push(Target {
-                fps: 15,
-                resolution: ResolutionStep::Hd720,
-            });
+        if can_reduce_resolution {
+            // shortcut: fontes de 720p ou menos só reduzem FPS; abrir 540p para elas se o campo pedir.
+            for resolution in [ResolutionStep::Hd720, ResolutionStep::Hd540] {
+                steps.push(Target {
+                    fps: initial.min(30),
+                    resolution,
+                });
+            }
         }
         let spent_ms = vec![0; steps.len()];
         let rate_need_bps = vec![None; steps.len()];
@@ -390,7 +407,7 @@ mod tests {
         assert_eq!(g.target().fps, 30);
     }
     #[test]
-    fn descends_by_one_step_and_resolution_only_after_fifteen() {
+    fn descends_by_one_step_and_resolution_comes_before_low_fps() {
         let mut g = LoadGovernor::new(60, true, 0);
         let mut changes = Vec::new();
         for t in 1..=100 {
@@ -406,21 +423,28 @@ mod tests {
                     resolution: ResolutionStep::Native
                 },
                 Target {
-                    fps: 20,
-                    resolution: ResolutionStep::Native
-                },
-                Target {
-                    fps: 15,
-                    resolution: ResolutionStep::Native
-                },
-                Target {
-                    fps: 15,
+                    fps: 30,
                     resolution: ResolutionStep::Hd720
+                },
+                Target {
+                    fps: 30,
+                    resolution: ResolutionStep::Hd540
                 }
             ]
         );
-        assert!(changes.iter().all(|target| target.fps >= 15));
-        assert_eq!(g.diagnostics(100_000).change_count, 4);
+        assert_eq!(g.diagnostics(100_000).change_count, 3);
+    }
+    #[test]
+    fn source_that_cannot_shrink_keeps_the_fps_only_ladder() {
+        let mut g = LoadGovernor::new(60, false, 0);
+        let mut fps = Vec::new();
+        for t in 1..=200 {
+            if let Some(target) = g.observe(window(t * 1000, true)) {
+                assert_eq!(target.resolution, ResolutionStep::Native);
+                fps.push(target.fps);
+            }
+        }
+        assert_eq!(fps, vec![30, 20, 15]);
     }
     #[test]
     fn health_recovers_one_step_after_longer_hold() {

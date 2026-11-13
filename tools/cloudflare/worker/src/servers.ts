@@ -116,7 +116,7 @@ export class ServerDirectory {
   }
 
   inviteTarget(uid: string, serverId?: string, channelId?: string): InviteDestination {
-    if (!serverId) return this.defaultChannel(uid);
+    if (!serverId) throw new ApiError(409, "destino_obrigatorio", "Escolha o servidor do convite.");
     this.manage(uid, serverId);
     const first = channelId ?? this.sql.exec<{ id: string }>("SELECT id FROM channels WHERE server_id = ? ORDER BY created_at,id LIMIT 1", serverId).toArray()[0]?.id;
     if (!first) throw new ApiError(404, "canal_nao_encontrado", "Este servidor não tem canais disponíveis.");
@@ -204,16 +204,10 @@ export class ServerDirectory {
 
   leave(uid: string, serverId: string): DirectoryChange {
     const role = this.role(uid, serverId);
+    if (role === "owner") throw new ApiError(409, "transfira_propriedade", "Transfira a propriedade ou exclua o servidor antes de sair.");
     const notify = this.memberIds(serverId);
     const owners = this.sql.exec<{ user_id: string }>("SELECT user_id FROM live WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?)", serverId).toArray().map(row => row.user_id);
     this.storage.transactionSync(() => {
-      if (role === "owner") {
-        const next = this.sql.exec<{ user_id: string }>("SELECT user_id FROM members WHERE server_id = ? AND user_id != ? ORDER BY CASE role WHEN 'admin' THEN 0 ELSE 1 END,joined_at,user_id LIMIT 1", serverId, uid).toArray()[0];
-        if (next) {
-          this.sql.exec("UPDATE servers SET owner_id = ? WHERE id = ?", next.user_id, serverId);
-          this.sql.exec("UPDATE members SET role = 'owner' WHERE server_id = ? AND user_id = ?", serverId, next.user_id);
-        } else this.deleteRows(serverId);
-      }
       this.sql.exec("DELETE FROM members WHERE server_id = ? AND user_id = ?", serverId, uid);
       this.sql.exec("UPDATE users SET default_server_id = NULL WHERE id = ? AND default_server_id = ?", uid, serverId);
       this.sql.exec("DELETE FROM live WHERE user_id = ? AND channel_id IN (SELECT id FROM channels WHERE server_id = ?)", uid, serverId);
@@ -229,6 +223,19 @@ export class ServerDirectory {
     this.storage.transactionSync(() => this.deleteRows(serverId));
     return { stopOwners, revokeOwners: [], notify };
   }
+
+  transfer(uid: string, serverId: string, memberId: string): void {
+    this.manage(uid, serverId, true);
+    if (uid === memberId) throw new ApiError(400, "membro_invalido", "Escolha outro membro.");
+    this.role(memberId, serverId);
+    this.storage.transactionSync(() => {
+      this.sql.exec("UPDATE members SET role = 'admin' WHERE server_id = ? AND user_id = ?", serverId, uid);
+      this.sql.exec("UPDATE members SET role = 'owner' WHERE server_id = ? AND user_id = ?", serverId, memberId);
+      this.sql.exec("UPDATE servers SET owner_id = ? WHERE id = ?", memberId, serverId);
+    });
+  }
+
+  assertManage(uid: string, serverId: string): void { this.manage(uid, serverId); }
 
   private deleteRows(serverId: string): void {
     this.sql.exec("DELETE FROM live WHERE channel_id IN (SELECT id FROM channels WHERE server_id = ?)", serverId);
@@ -246,7 +253,7 @@ export class ServerDirectory {
       members: this.sql.exec<{ id: string; username: string; display: string; avatar: string | null; role: MemberRole }>("SELECT u.id,u.username,u.display,u.avatar,m.role FROM members m JOIN users u ON u.id = m.user_id WHERE m.server_id = ? ORDER BY u.display,u.id", server.id).toArray().map(user => ({ id: user.id, username: user.username, displayName: user.display, avatar: safeAvatar(user.avatar), role: user.role, online: online(user.id) })),
       channels: this.sql.exec<{ id: string; name: string }>("SELECT id,name FROM channels WHERE server_id = ? ORDER BY created_at,id", server.id).toArray().map(channel => ({
         id: channel.id, name: channel.name,
-        live: this.sql.exec<{ id: string; username: string; display: string; avatar: string | null; title: string | null; since: number; viewers: number }>("SELECT u.id,u.username,u.display,u.avatar,l.title,l.since,l.viewers FROM live l JOIN users u ON u.id = l.user_id WHERE l.channel_id = ? AND l.updated >= ? ORDER BY l.since,u.id", channel.id, Math.floor(Date.now() / 1000) - 90).toArray().map(user => ({ id: user.id, username: user.username, displayName: user.display, avatar: safeAvatar(user.avatar), online: online(user.id), live: { title: user.title, since: user.since, viewers: user.viewers } })),
+        live: this.sql.exec<{ id: string; username: string; display: string; avatar: string | null; title: string | null; since: number; viewers: number }>("SELECT u.id,u.username,u.display,u.avatar,l.title,l.since,l.viewers FROM live l JOIN users u ON u.id = l.user_id WHERE l.channel_id = ? AND l.updated >= ? ORDER BY l.since,u.id", channel.id, Math.floor(Date.now() / 1000) - 90).toArray().map(user => ({ id: user.id, username: user.username, displayName: user.display, avatar: safeAvatar(user.avatar), online: online(user.id), live: { title: user.title, since: user.since, viewers: user.viewers, destination: { kind: "channel" as const, channelId: channel.id } } })),
       })),
     }));
   }

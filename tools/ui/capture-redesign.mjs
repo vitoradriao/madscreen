@@ -22,6 +22,7 @@ try{
   const evaluate=async expression=>{const r=await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error(r.exceptionDetails.exception?.description||r.exceptionDetails.text);return r.result.value;};
   await send('Runtime.enable');await send('Network.enable');await send('Network.setBlockedURLs',{urls:['https://*','wss://*']});await send('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false});
   await send('Emulation.setFocusEmulationEnabled',{enabled:true});
+  await send('Browser.setPermission',{permission:{name:'fullscreen',allowWithoutGesture:true},setting:'granted',origin:`http://127.0.0.1:${server.address().port}`});
   await send('Page.navigate',{url:`http://127.0.0.1:${server.address().port}`});
   for(let i=0;i<100&&!await evaluate('!!window.demo');i++)await new Promise(r=>setTimeout(r,100));
   const pause=()=>new Promise(r=>setTimeout(r,180));
@@ -72,7 +73,11 @@ try{
   await act('demo.admin(true);demo.shell();demo.page("settings")');await textClick('Serviço de transmissão');await capture('conta-admin','Conta com administração de serviço','Conta autorizada pelo backend → Conta → Serviço de transmissão.','Dados administrativos fictícios; não representa a configuração de produção.');
   await reset();await act('demo.tray()');await capture('bandeja','Aviso de minimizar para bandeja','Primeiro fechamento da janela pelo X → aviso da bandeja.','Aviso real aberto diretamente em demonstração.');
   await reset();await click('[data-focuskey="watch-bruno"]');await act('demo.tracks()');
-  await send('Input.dispatchMouseEvent',{type:'mouseMoved',x:1050,y:500});await act("document.querySelector('.stage .controls button').focus()");await capture('player-controles','Controles sobre o vídeo','Player → mover o cursor ou focar os controles do vídeo.','Vídeo fictício; controles exibidos por foco de teclado.');
+  const volumePoint=await evaluate(`(() => { const r=document.querySelector('.stage .volume').getBoundingClientRect(); return {x:r.left+r.width/3,y:r.top+r.height/2}; })()`);
+  await send('Input.dispatchMouseEvent',{type:'mouseMoved',...volumePoint});
+  await send('Input.dispatchMouseEvent',{type:'mousePressed',...volumePoint,button:'left',clickCount:1});
+  await send('Input.dispatchMouseEvent',{type:'mouseReleased',...volumePoint,button:'left',clickCount:1});
+  await capture('player-controles','Controles sobre o vídeo','Player → ajustar o volume.','Vídeo local e faixa de áudio silenciosa.');
   await send('Runtime.evaluate',{expression:"document.querySelector('.stage').requestFullscreen()",awaitPromise:true,userGesture:true});await capture('tela-cheia','Player em tela cheia','Player → Tela cheia ou atalho F.','Fullscreen real do Chrome; sem moldura nativa do Windows.');
   await textClick('Ajuda');await capture('tela-cheia-ajuda','Ajuda em tela cheia','Tela cheia → Ajuda');if(!await evaluate('!!document.fullscreenElement'))throw Error('Ajuda saiu da tela cheia');await textClick('Fechar ajuda');
   await act('document.exitFullscreen()');

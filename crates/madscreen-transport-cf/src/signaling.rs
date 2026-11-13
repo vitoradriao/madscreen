@@ -103,6 +103,7 @@ impl Worker {
             providers: [&'static str; 2],
             expected_provider: &'static str,
             channel_id: &'a Option<String>,
+            direct_session_id: &'a Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             audio_mid: Option<&'static str>,
         }
@@ -113,6 +114,7 @@ impl Worker {
                 providers: ["cloudflare", "livekit"],
                 expected_provider: "livekit",
                 channel_id: &config.channel_id,
+                direct_session_id: &config.direct_session_id,
                 audio_mid: config.audio.then_some("audio"),
             },
         )
@@ -431,6 +433,29 @@ mod tests {
         );
         assert!(body.get("apiKey").is_none());
         assert!(body.get("apiSecret").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn livekit_start_carries_private_session_without_channel() -> Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let (mut config, server) = endpoint(
+            200,
+            r#"{"generation":8,"livekit":{"url":"wss://media.example.com","token":"join-token","room":"room","identity":"publisher"}}"#,
+        )?;
+        config.direct_session_id = Some("d_private".into());
+        runtime.block_on(async { Worker::new(&config)?.start_livekit(&config).await })?;
+        let request = server
+            .join()
+            .map_err(|_| anyhow::anyhow!("mock server panicked"))??;
+        let (_, body) = request
+            .split_once("\r\n\r\n")
+            .context("mock request body")?;
+        let body: serde_json::Value = serde_json::from_str(body)?;
+        assert_eq!(body["directSessionId"], "d_private");
+        assert!(body["channelId"].is_null());
         Ok(())
     }
 

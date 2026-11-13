@@ -1243,6 +1243,7 @@ mod lifecycle_tests {
                 url: Some("https://fixture.invalid".into()),
                 token: Some("fixture-only".into()),
                 channel_id: Some("same-channel".into()),
+                direct_session_id: None,
                 profile_level_id: None,
             }),
             audio: Some(AudioRequest {

@@ -65,6 +65,7 @@ await build({
   platform: "neutral",
   target: "es2022",
   external: ["cloudflare:workers"],
+  define: { __HUB_REVISION__: JSON.stringify(process.env.MADSCREEN_BUILD_REVISION ?? "development") },
   minify,
   legalComments: "none",
   logLevel: "info",

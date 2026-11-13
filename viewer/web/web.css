@@ -1,5 +1,7 @@
 /* Layout do viewer web. Cores, fontes e componentes vêm de ../shared/tokens.css. */
 #app { min-height: 100%; display: flex; flex-direction: column; }
+.web-directory { width: 100%; max-width: none; margin: 0; padding: 0; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.web-directory > .server-view { flex: 1; min-height: calc(100dvh - 60px); }
 
 .topbar { display: flex; align-items: center; justify-content: space-between; height: 60px; padding: 0 var(--sp-5); border-bottom: 1px solid var(--border); background: var(--bg-sidebar); }
 .brand { display: flex; align-items: center; gap: var(--sp-2); font-weight: var(--fw-medium); letter-spacing: var(--tracking-title); font-size: var(--fs-lg); }

@@ -141,6 +141,7 @@ export const startShareCloudflare = (
   audio?: AudioChoice,
   channelId?: string,
   fpsChosen?: boolean,
+  directSessionId?: string,
 ) =>
   invoke<void>("start_share_cloudflare", {
     height,
@@ -151,6 +152,7 @@ export const startShareCloudflare = (
     token: token ?? null,
     audio: audio ?? null,
     channelId: channelId ?? null,
+    directSessionId: directSessionId ?? null,
     fpsChosen: fpsChosen ?? null,
   });
 export const listAudioApps = () => invoke<AudioApp[]>("list_audio_apps");

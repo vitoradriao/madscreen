@@ -10,12 +10,17 @@ export const WORKER_URL: string =
 
 export const client = new MadClient(WORKER_URL);
 
-/** Abre a URL no navegador do sistema (login Discord/Google). */
-export async function openExternal(url: string): Promise<void> {
+/**
+ * Abre a URL no navegador do sistema (login Discord/Google). Retorna `false` quando o sistema
+ * recusou a abertura, para a tela oferecer copiar o link.
+ */
+export async function openExternal(url: string): Promise<boolean> {
   try {
     const { openUrl } = await import("@tauri-apps/plugin-opener");
     await openUrl(url);
-  } catch {
-    window.open(url, "_blank", "noopener");
+    return true;
+  } catch (error) {
+    console.warn("Falha ao abrir o navegador do sistema", error);
+    return window.open(url, "_blank", "noopener") !== null;
   }
 }

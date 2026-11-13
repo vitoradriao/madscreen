@@ -13,6 +13,8 @@
     "core:window:allow-close",
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
     "core:window:allow-start-dragging",
     "core:window:allow-show",
     "core:window:allow-set-focus",
@@ -24,6 +26,9 @@
       "allow": [
         {
           "url": "https://*.workers.dev/*"
+        },
+        {
+          "url": "https://hub.livekit.example.com/*"
         }
       ]
     }

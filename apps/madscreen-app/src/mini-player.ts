@@ -124,7 +124,7 @@ export async function openMiniPlayerWithHost(stage: HTMLElement, title: string, 
       const target = event.target as HTMLElement | null;
       if (target && /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return;
       if (event.key.toLowerCase() === "m") { event.preventDefault(); stage.querySelector<HTMLButtonElement>(".audio-ctl button")?.click(); }
-      if (event.key.toLowerCase() === "f") stage.querySelector<HTMLButtonElement>('button[title="Tela cheia"]')?.click();
+      if (event.key.toLowerCase() === "f") stage.querySelector<HTMLButtonElement>(".player-fullscreen")?.click();
     });
     stage.style.cssText = "width:100%;flex:1;min-height:0";
     // Remover/adotar o <video> o pausa e o autoplay não retoma: reinicia a reprodução no novo documento.
