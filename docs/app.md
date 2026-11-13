@@ -182,8 +182,8 @@ O mecanismo usa os [hooks de instalação do Tauri](https://v2.tauri.app/distrib
 ## Updater
 
 `tauri-plugin-updater` aponta para
-`https://github.com/vitoradriao/madscreen-releases/releases/latest/download/latest.json`
-(repositório público, separado do código). A 0.1.2 embarca a chave pública final e
+`https://github.com/vitoradriao/madscreen/releases/latest/download/latest.json`
+(repositório público do projeto). A 0.1.2 embarca a chave pública final e
 exige que a versão anunciada corresponda à versão assinada. A chave privada e a
 senha ficam fora do Git e nos secrets `TAURI_SIGNING_PRIVATE_KEY` e
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` do CI.
@@ -192,13 +192,9 @@ Ao abrir, o app consulta atualizações e mostra aviso. A instalação continua
 dependendo de **Instalar e reiniciar**; há progresso de download e validação antes
 de executar o instalador. A 0.1.1 precisa da instalação manual da 0.1.2 uma vez.
 
-O workflow gera `.sig`, `latest.json` e hashes, verifica assinatura e versão e
-guarda o pacote como artefato. Publicação no repositório público pode ser solicitada
-por `workflow_dispatch` com `publish_release=true`, exigindo `RELEASE_REPO_TOKEN`
-restrito ao repositório de releases. Sem ele, o build continua gerando artefatos;
-uma solicitação de publicação falha explicitamente no preflight. O token entre
-repositórios foi cadastrado em 31/out/2026; conferir a execução do CI antes de
-considerar a publicação automática validada.
+O workflow verifica a assinatura e pode preparar um rascunho com `publish_release=true`
+e `RELEASE_REPO_TOKEN` com escrita no repositório público. A promoção ocorre após
+a conferência dos anexos e do código-fonte correspondente à tag.
 
 Procedimento de assinatura, publicação e validação em
 [updater.md](updater.md). Não há chave privada no repositório.

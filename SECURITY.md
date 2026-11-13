@@ -3,7 +3,7 @@
 ## Versões suportadas
 
 O projeto está em desenvolvimento pré-1.0: correções de segurança são feitas na **versão mais recente** publicada em
-[madscreen-releases](https://github.com/vitoradriao/madscreen-releases/releases/latest). Versões antigas não recebem
+[madscreen](https://github.com/vitoradriao/madscreen/releases/latest). Versões antigas não recebem
 *backports*; o app avisa quando há atualização assinada.
 
 ## Como reportar uma vulnerabilidade

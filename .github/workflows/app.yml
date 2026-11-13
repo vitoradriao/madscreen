@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: "Publicar a versao assinada em madscreen-releases"
+        description: "Preparar rascunho assinado na tag publica existente"
         type: boolean
         default: false
 
@@ -152,13 +152,13 @@ jobs:
           New-Item -ItemType Directory -Path $previousDir -Force | Out-Null
           $previous = $null
           # Ausencia/acesso negado ao release anterior nao inventa aceite de upgrade.
-          $releaseJson = gh release view --repo vitoradriao/madscreen-releases --json 'tagName,assets' 2>$null
+          $releaseJson = gh release view --repo vitoradriao/madscreen --json 'tagName,assets' 2>$null
           if ($LASTEXITCODE -eq 0) {
             $previousRelease = ($releaseJson -join "`n") | ConvertFrom-Json
             $asset = @($previousRelease.assets | Where-Object { $_.name -match '_x64-setup\.exe$' } | Sort-Object name | Select-Object -First 1)
             if ($asset.Count -eq 0) { $asset = @($previousRelease.assets | Where-Object { $_.name -eq 'madscreen-setup.exe' }) }
             if ($asset.Count -eq 1) {
-              gh release download $previousRelease.tagName --repo vitoradriao/madscreen-releases --pattern $asset[0].name --dir $previousDir
+              gh release download $previousRelease.tagName --repo vitoradriao/madscreen --pattern $asset[0].name --dir $previousDir
               if ($LASTEXITCODE -eq 0) { $previous = Join-Path $previousDir $asset[0].name }
             }
           }
@@ -227,11 +227,12 @@ jobs:
           "$aliasHash  madscreen-setup.exe" | Set-Content -LiteralPath "$downloadAlias.sha256" -Encoding utf8
           $releaseNotes = "docs/releases/$releaseVersion.md"
           if (-not (Test-Path -LiteralPath $releaseNotes)) { throw 'Notas de release ausentes.' }
-          gh release view $releaseTag --repo vitoradriao/madscreen-releases 2>$null
+          gh release view $releaseTag --repo vitoradriao/madscreen 2>$null
           if ($LASTEXITCODE -eq 0) { throw 'A release ja existe; nao sera sobrescrita.' }
-          gh release create $releaseTag --repo vitoradriao/madscreen-releases --draft --title "madscreen $releaseVersion" --notes-file $releaseNotes
+          $sourceSha = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$releaseTag" --jq .object.sha
+          if ($LASTEXITCODE -ne 0 -or $sourceSha -ne $env:GITHUB_SHA) { throw 'Build deve corresponder a tag de origem (leve).' }
+          gh release create $releaseTag --repo vitoradriao/madscreen --verify-tag --draft --title "madscreen $releaseVersion" --notes-file $releaseNotes
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          gh release upload $releaseTag --repo vitoradriao/madscreen-releases $installerPath "$installerPath.sig" target/release-manifest/latest.json target/release-manifest/SHA256SUMS.txt $downloadAlias "$downloadAlias.sig" "$downloadAlias.sha256"
+          gh release upload $releaseTag --repo vitoradriao/madscreen $installerPath "$installerPath.sig" target/release-manifest/latest.json target/release-manifest/SHA256SUMS.txt $downloadAlias "$downloadAlias.sig" "$downloadAlias.sha256"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          gh release edit $releaseTag --repo vitoradriao/madscreen-releases --draft=false --latest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host 'Rascunho preparado. Confira as fontes correspondentes e os hashes antes da promocao.'

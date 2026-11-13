@@ -13,7 +13,7 @@ export function createManifest({ version, signature, filename, notes = "", publi
   if (Buffer.from(lines[1], "base64").length !== 74 || Buffer.from(lines[3], "base64").length !== 64) throw Error("Formato de assinatura inválido.");
   if (!Number.isFinite(Date.parse(publishedAt))) throw Error("Data de publicação inválida.");
   return { version, notes, pub_date: new Date(publishedAt).toISOString(), platforms: { "windows-x86_64": {
-    signature: signature.trim(), url: `https://github.com/vitoradriao/madscreen-releases/releases/download/v${version}/${filename}`,
+    signature: signature.trim(), url: `https://github.com/vitoradriao/madscreen/releases/download/v${version}/${filename}`,
   } } };
 }
 

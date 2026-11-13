@@ -42,13 +42,13 @@ jobs:
           if ($installers.Count -ne 1) { throw 'Artefato deve conter exatamente um instalador x64' }
           "SMOKE_INSTALLER=$($installers[0].FullName)" >> $env:GITHUB_ENV
           $previousDir = Join-Path $env:RUNNER_TEMP 'smoke-previous'
-          $releaseJson = gh release view --repo vitoradriao/madscreen-releases --json 'tagName,assets' 2>$null
+          $releaseJson = gh release view --repo vitoradriao/madscreen --json 'tagName,assets' 2>$null
           if ($LASTEXITCODE -eq 0) {
             $release = ($releaseJson -join "`n") | ConvertFrom-Json
             $asset = @($release.assets | Where-Object { $_.name -match '_x64-setup\.exe$' } | Sort-Object name | Select-Object -First 1)
             if ($asset.Count -eq 0) { $asset = @($release.assets | Where-Object { $_.name -eq 'madscreen-setup.exe' }) }
             if ($asset.Count -eq 1) {
-              gh release download $release.tagName --repo vitoradriao/madscreen-releases --pattern $asset[0].name --dir $previousDir
+              gh release download $release.tagName --repo vitoradriao/madscreen --pattern $asset[0].name --dir $previousDir
               if ($LASTEXITCODE -eq 0) { "SMOKE_PREVIOUS=$(Join-Path $previousDir $asset[0].name)" >> $env:GITHUB_ENV }
             }
           }

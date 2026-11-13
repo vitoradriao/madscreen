@@ -2,7 +2,7 @@
   "name": "madscreen-app",
   "private": true,
   "license": "GPL-3.0-or-later",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "type": "module",
   "scripts": {
     "dev": "vite",

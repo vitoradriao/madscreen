@@ -9,7 +9,7 @@ test("manifesto público usa NSIS assinado, versão e destino fixo sem código p
   const result=createManifest(valid);
   assert.equal(result.version,"0.1.2");
   assert.equal(result.platforms["windows-x86_64"].signature,valid.signature);
-  assert.equal(result.platforms["windows-x86_64"].url,"https://github.com/vitoradriao/madscreen-releases/releases/download/v0.1.2/madscreen_0.1.2_x64-setup.exe");
+  assert.equal(result.platforms["windows-x86_64"].url,"https://github.com/vitoradriao/madscreen/releases/download/v0.1.2/madscreen_0.1.2_x64-setup.exe");
 });
 test("versão adulterada, versão sem assinatura e caminhos externos são recusados",()=>{
   for(const change of [{version:"0.1.3"},{version:"01.1.2"},{version:"0.1.2/escape"},{signature:"http://signature"},{signature:""},{filename:"../app.exe"},{filename:"https://attacker/app.exe"},{publishedAt:"invalid"}]) assert.throws(()=>createManifest({...valid,...change}));

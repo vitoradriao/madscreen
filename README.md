@@ -10,7 +10,7 @@
 ![Plataforma: Windows 10 1903+ x64](https://img.shields.io/badge/plataforma-Windows%2010%201903%2B%20x64-0078d4)
 ![Estado: pré-1.0](https://img.shields.io/badge/estado-pr%C3%A9--1.0-orange)
 
-[Baixar](https://github.com/vitoradriao/madscreen-releases/releases/latest) ·
+[Baixar](https://github.com/vitoradriao/madscreen/releases/latest) ·
 [Documentação](docs/README.md) ·
 [Contribuir](CONTRIBUTING.md) ·
 [Roadmap](docs/roadmap.md)
@@ -60,7 +60,7 @@ falta e o que está em avaliação está em [docs/roadmap.md](docs/roadmap.md).
 
 ## Instalar e usar
 
-1. Baixe o instalador `.exe` na [última release](https://github.com/vitoradriao/madscreen-releases/releases/latest).
+1. Baixe o instalador `.exe` na [última release](https://github.com/vitoradriao/madscreen/releases/latest).
 2. Abra o convite que recebeu de um amigo e entre com Discord (há contingência por usuário + convite).
 3. Escolha um canal. Em **Compartilhar**, selecione janela ou monitor, qualidade e áudio. Para assistir, abra uma
    live do canal; adicione outra para usar duas telas.

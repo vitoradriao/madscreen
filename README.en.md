@@ -10,7 +10,7 @@
 ![Platform: Windows 10 1903+ x64](https://img.shields.io/badge/platform-Windows%2010%201903%2B%20x64-0078d4)
 ![Status: pre-1.0](https://img.shields.io/badge/status-pre--1.0-orange)
 
-[Download](https://github.com/vitoradriao/madscreen-releases/releases/latest) ·
+[Download](https://github.com/vitoradriao/madscreen/releases/latest) ·
 [Documentation](docs/README.md) ·
 [Contribute](CONTRIBUTING.md) ·
 [Roadmap](docs/roadmap.md)
@@ -60,7 +60,7 @@ games and hardware** — building and passing tests is not the same as qualified
 
 ## Install and use
 
-1. Download the `.exe` installer from the [latest release](https://github.com/vitoradriao/madscreen-releases/releases/latest).
+1. Download the `.exe` installer from the [latest release](https://github.com/vitoradriao/madscreen/releases/latest).
 2. Open the invitation you received from a friend and sign in with Discord (username + invitation fallback is available).
 3. Choose a channel. In **Compartilhar** (Share), select a window or monitor, quality and audio. To watch, open a
    live stream from the channel; add another to use two screens.
