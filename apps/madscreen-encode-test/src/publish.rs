@@ -54,7 +54,8 @@ pub struct Live {
     governor_bytes: u64,
     /// Pede sondagem quando a estimativa despenca; `MADSCREEN_PROBE_NUDGE=0` desliga.
     probe_nudge: Option<ProbeNudge>,
-    /// Pede sondagem quando o encoder gasta a taxa toda com a estimativa baixa; mesmo opt-out.
+    /// Pede sondagem quando o encoder gasta a taxa toda com a estimativa baixa; desliga com
+    /// `MADSCREEN_PROBE_NUDGE=0` ou `MADSCREEN_STARVED_PROBE=0` (A/B de laboratório).
     starved_probe: Option<StarvedProbe>,
     /// Laboratório (MADSCREEN_LAB_PROBE_AT_S): uma sondagem forçada, para exercitar o caminho do
     /// transporte numa sala real sem precisar derrubar a estimativa.
@@ -505,8 +506,9 @@ impl Live {
             probe_nudge: std::env::var_os("MADSCREEN_PROBE_NUDGE")
                 .is_none_or(|v| v != "0")
                 .then(|| ProbeNudge::new(std::time::Instant::now())),
-            starved_probe: std::env::var_os("MADSCREEN_PROBE_NUDGE")
-                .is_none_or(|v| v != "0")
+            starved_probe: ["MADSCREEN_PROBE_NUDGE", "MADSCREEN_STARVED_PROBE"]
+                .iter()
+                .all(|name| std::env::var_os(name).is_none_or(|v| v != "0"))
                 .then(|| StarvedProbe::new(std::time::Instant::now())),
             forced_probe_at: std::env::var("MADSCREEN_LAB_PROBE_AT_S")
                 .ok()

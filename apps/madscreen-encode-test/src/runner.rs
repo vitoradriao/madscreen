@@ -1003,6 +1003,11 @@ pub(crate) fn run_profile(
         measure_generation: capture.is_none()
             && matches!(options.synthetic, SyntheticArg::Animated),
     };
+    // Laboratório: fonte estática que passa a animada depois de N s (tela parada -> jogo voltando).
+    let lab_animate_at = std::env::var("MADSCREEN_LAB_ANIMATE_AFTER_S")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
     let mut slots = FlightSlots::new(ring_size, options.inflight as usize)?;
     if let Some(session) = session {
         session.set_diagnostic_clock(collector.output.diagnostic_clock());
@@ -1372,7 +1377,9 @@ pub(crate) fn run_profile(
                     converter.begin_frame(slot);
                     let frame = if !corpus.is_empty() {
                         synthetic[slot].upload(&corpus[produced as usize % corpus.len()])?
-                    } else if matches!(options.synthetic, SyntheticArg::Static) {
+                    } else if matches!(options.synthetic, SyntheticArg::Static)
+                        && lab_animate_at.is_none_or(|at| std::time::Instant::now() < at)
+                    {
                         synthetic[slot].frame()?
                     } else {
                         synthetic[slot].render(produced)?
