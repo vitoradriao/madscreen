@@ -54,6 +54,8 @@ pub struct Live {
     governor_bytes: u64,
     /// Pede sondagem quando a estimativa despenca; `MADSCREEN_PROBE_NUDGE=0` desliga.
     probe_nudge: Option<ProbeNudge>,
+    /// Pede sondagem quando o encoder gasta a taxa toda com a estimativa baixa; mesmo opt-out.
+    starved_probe: Option<StarvedProbe>,
     /// Laboratório (MADSCREEN_LAB_PROBE_AT_S): uma sondagem forçada, para exercitar o caminho do
     /// transporte numa sala real sem precisar derrubar a estimativa.
     forced_probe_at: Option<std::time::Instant>,
@@ -165,6 +167,84 @@ impl ProbeNudge {
         }
         self.event = Some(event);
         due
+    }
+}
+
+/// Live de 17/nov (NVENC, Cyberpunk): com a imagem parada o encoder mandou ~0,1 Mbps, o GCC prendeu a
+/// estimativa em 1,5x isso e um pico de atraso a levou a 30 kbps (0,85x do que passava). Quando o
+/// jogo voltou, o encoder gastava todo o piso de 1 Mbps e a estimativa subia ~20 kbps/s, com o
+/// `ProbeNudge` já em espera. Aqui o gatilho é o encoder saturado (dois segundos produzindo >= 60%
+/// da taxa aplicada) com o pedido abaixo da metade do teto. Sondagem que não sobe o pedido em 25%
+/// dobra o intervalo (num link limitado a estimativa já está certa); uma que sobe volta ao mínimo.
+struct StarvedProbe {
+    origin: std::time::Instant,
+    second: u64,
+    bytes_now: u64,
+    /// Bytes dos dois últimos segundos completos.
+    bytes_done: [u64; 2],
+    last_probe: Option<(std::time::Instant, u64)>,
+    interval_s: u64,
+}
+
+const STARVED_WARMUP_S: u64 = 10;
+const STARVED_MIN_INTERVAL_S: u64 = 10;
+const STARVED_MAX_INTERVAL_S: u64 = 300;
+
+impl StarvedProbe {
+    fn new(now: std::time::Instant) -> Self {
+        Self {
+            origin: now,
+            second: 0,
+            bytes_now: 0,
+            bytes_done: [0; 2],
+            last_probe: None,
+            interval_s: STARVED_MIN_INTERVAL_S,
+        }
+    }
+
+    /// Outra sondagem (queda brusca) também conta para o intervalo.
+    fn note_probe(&mut self, request_bps: u64, now: std::time::Instant) {
+        self.last_probe = Some((now, request_bps));
+    }
+
+    fn due(
+        &mut self,
+        au_bytes: u64,
+        applied_bps: u32,
+        request_bps: u64,
+        cap_bps: u32,
+        now: std::time::Instant,
+    ) -> bool {
+        let second = now.saturating_duration_since(self.origin).as_secs();
+        if second != self.second {
+            // Segundos sem AU contam como zero.
+            self.bytes_done = if second == self.second + 1 {
+                [self.bytes_done[1], self.bytes_now]
+            } else {
+                [0, 0]
+            };
+            self.second = second;
+            self.bytes_now = 0;
+        }
+        self.bytes_now = self.bytes_now.saturating_add(au_bytes);
+        let produced_bps = (self.bytes_done[0] + self.bytes_done[1]) * 8 / 2;
+        let saturated = produced_bps * 10 >= u64::from(applied_bps) * 6;
+        let starved = request_bps > 0 && request_bps * 2 < u64::from(cap_bps);
+        if second < STARVED_WARMUP_S || !saturated || !starved {
+            return false;
+        }
+        if let Some((at, before_bps)) = self.last_probe {
+            if now.saturating_duration_since(at).as_secs() < self.interval_s {
+                return false;
+            }
+            self.interval_s = if request_bps * 4 >= before_bps * 5 {
+                STARVED_MIN_INTERVAL_S
+            } else {
+                (self.interval_s * 2).min(STARVED_MAX_INTERVAL_S)
+            };
+        }
+        self.last_probe = Some((now, request_bps));
+        true
     }
 }
 
@@ -425,6 +505,9 @@ impl Live {
             probe_nudge: std::env::var_os("MADSCREEN_PROBE_NUDGE")
                 .is_none_or(|v| v != "0")
                 .then(|| ProbeNudge::new(std::time::Instant::now())),
+            starved_probe: std::env::var_os("MADSCREEN_PROBE_NUDGE")
+                .is_none_or(|v| v != "0")
+                .then(|| StarvedProbe::new(std::time::Instant::now())),
             forced_probe_at: std::env::var("MADSCREEN_LAB_PROBE_AT_S")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
@@ -608,6 +691,27 @@ impl Live {
                 nivel_anterior_bps = nudge.event.map_or(0, |e| e.level_bps),
                 sondagens = nudge.count,
                 "sondagem de banda pedida apos queda da estimativa"
+            );
+            if let Some(starved) = self.starved_probe.as_mut() {
+                starved.note_probe(self.last_request_bps, std::time::Instant::now());
+            }
+        }
+        if accepted
+            && let Some(starved) = self.starved_probe.as_mut()
+            && starved.due(
+                au.data.len() as u64,
+                self.last_bps,
+                self.last_request_bps,
+                self.cap_bps,
+                std::time::Instant::now(),
+            )
+        {
+            self.publisher.request_probe();
+            tracing::info!(
+                pedido_bps = self.last_request_bps,
+                aplicado_bps = self.last_bps,
+                intervalo_s = starved.interval_s,
+                "sondagem de banda pedida com o encoder saturado"
             );
         }
         let rate_now_ms = self.rate_ramp.as_ref().map_or(0, |_| {
@@ -977,5 +1081,69 @@ mod probe_nudge_tests {
     #[test]
     fn startup_ramp_is_ignored() {
         assert!(run(&[(0, 18_000_000), (5, 4_000_000), (12, 4_000_000)], 30).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod starved_probe_tests {
+    use super::StarvedProbe;
+    use std::time::{Duration, Instant};
+
+    const CAP: u32 = 14_000_000;
+
+    /// 60 AU/s; `at(segundo)` devolve (bps produzidos, taxa aplicada, pedido). Segundos com sondagem.
+    fn run(until_s: u64, at: impl Fn(u64) -> (u64, u32, u64)) -> Vec<u64> {
+        let t0 = Instant::now();
+        let mut probe = StarvedProbe::new(t0);
+        let mut probes = Vec::new();
+        for frame in 0..until_s * 60 {
+            let second = frame / 60;
+            let (produced, applied, request) = at(second);
+            let now = t0 + Duration::from_micros(frame * 1_000_000 / 60);
+            if probe.due(produced / 8 / 60, applied, request, CAP, now) {
+                probes.push(second);
+            }
+        }
+        probes
+    }
+
+    #[test]
+    fn field_trace_static_then_motion_probes_once_motion_fills_the_floor() {
+        // 17/nov: tela parada ~0,1 Mbps com pedido de 440 kbps; aos 60 s o jogo volta e o encoder
+        // gasta ~0,8 Mbps do piso de 1 Mbps enquanto o pedido sobe 20 kbps/s.
+        let probes = run(90, |s| {
+            if s < 60 {
+                (100_000, 1_000_000, 440_000)
+            } else {
+                (800_000, 1_000_000, 193_000 + (s - 60) * 20_000)
+            }
+        });
+        assert_eq!(probes.first(), Some(&62));
+    }
+
+    #[test]
+    fn static_content_never_probes() {
+        assert!(run(120, |_| (100_000, 1_000_000, 440_000)).is_empty());
+    }
+
+    #[test]
+    fn estimate_near_the_cap_never_probes() {
+        assert!(run(120, |_| (8_000_000, 8_000_000, 8_000_000)).is_empty());
+    }
+
+    #[test]
+    fn limited_link_backs_off() {
+        // Link de 5 Mbps: a sondagem não muda a estimativa, o intervalo dobra.
+        let probes = run(400, |_| (5_000_000, 5_000_000, 5_000_000));
+        assert_eq!(probes, vec![10, 20, 40, 80, 160, 320]);
+    }
+
+    #[test]
+    fn probe_that_raises_the_estimate_keeps_the_short_interval() {
+        let probes = run(45, |s| {
+            let request = 1_000_000 + s * 100_000;
+            (request, request as u32, request)
+        });
+        assert_eq!(probes, vec![10, 20, 30, 40]);
     }
 }

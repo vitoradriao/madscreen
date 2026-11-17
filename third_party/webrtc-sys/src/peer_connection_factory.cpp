@@ -86,6 +86,27 @@ class EnableWarpFieldTrials final : public webrtc::FieldTrialsView {
   }
 };
 
+// madscreen: the upstream default (rate_control_settings.cc) is
+// "QueueSize:350,MinBitrate:30000,DropFrame:true". DropFrame drops frames
+// before the encoder when the congestion window fills; a pre-encoded
+// passthrough cannot re-encode, so every drop breaks the reference chain and
+// forces a keyframe (B1 run of 13/nov: 566 drops -> ~74 keyframes in 60 s,
+// 27 s frozen). DropFrame:false pushes back the target bitrate instead, which
+// the upstream encoder follows.
+class PassthroughCongestionWindowFieldTrials final
+    : public webrtc::FieldTrialsView {
+ public:
+  std::string Lookup(absl::string_view key) const override {
+    return key == "WebRTC-CongestionWindow"
+               ? "QueueSize:350,MinBitrate:30000,DropFrame:false"
+               : "";
+  }
+
+  std::unique_ptr<webrtc::FieldTrialsView> CreateCopy() const override {
+    return std::make_unique<PassthroughCongestionWindowFieldTrials>();
+  }
+};
+
 // An Environment accepts a single FieldTrialsView, so to enable several
 // independent trial groups (e.g. zero-playout-delay AND WARP) we combine their
 // views into one: Lookup delegates to each sub-view and returns the first
@@ -124,6 +145,7 @@ class CompositeFieldTrials final : public webrtc::FieldTrialsView {
 webrtc::Environment CreateEnvironment(bool zero_playout_delay,
                                       bool enable_warp) {
   std::vector<std::unique_ptr<webrtc::FieldTrialsView>> views;
+  views.push_back(std::make_unique<PassthroughCongestionWindowFieldTrials>());
   if (zero_playout_delay) {
     views.push_back(std::make_unique<ZeroPlayoutDelayFieldTrials>());
   }
