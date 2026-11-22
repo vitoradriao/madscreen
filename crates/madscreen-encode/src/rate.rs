@@ -388,6 +388,17 @@ mod tests {
     }
 
     #[test]
+    fn upward_floor_steps_keep_their_ceiling_across_a_hold_bucket_boundary() {
+        let mut ramp = RateRamp::new(14_000_000, 1_000_000);
+        ramp.request_at(14_000_000, 1_000);
+        ramp.request_at(600_000, 59_000);
+        ramp.applied(1_000_000, 59_000);
+        ramp.request_at(600_000, 61_000);
+        assert_eq!(ramp.probe_ceiling, 7_000_000);
+        assert_eq!(ramp.target(61_000), Some(1_150_000));
+    }
+
+    #[test]
     fn noise_extremes_and_new_session_are_bounded() {
         let mut ramp = RateRamp::new(u32::MAX, 0);
         ramp.request(u64::MAX);
