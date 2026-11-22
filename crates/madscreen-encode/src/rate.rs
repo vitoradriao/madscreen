@@ -53,6 +53,7 @@ pub struct RateRamp {
     base_floor: u32,
     floor: u32,
     applied: u32,
+    transport_budget: u32,
     requested: u32,
     last_application_ms: Option<u64>,
     hold_bucket: u64,
@@ -75,6 +76,7 @@ impl RateRamp {
             base_floor: floor,
             floor,
             applied: cap,
+            transport_budget: cap,
             requested: cap,
             last_application_ms: None,
             hold_bucket: 0,
@@ -102,9 +104,8 @@ impl RateRamp {
 
     /// Latest feedback replaces older requests, including while the encoder is busy.
     pub fn request(&mut self, bps: u64) {
-        self.requested = self
-            .budget(bps)
-            .clamp(u64::from(self.floor), u64::from(self.cap)) as u32;
+        self.transport_budget = self.budget(bps) as u32;
+        self.requested = self.transport_budget.max(self.floor);
     }
 
     /// Like `request`, but probes back toward half of the best budget of the last 30–60 s.
@@ -147,7 +148,7 @@ impl RateRamp {
         self.request(bps);
     }
 
-    /// Drops are immediate; recovery grows at most 15% per successful second.
+    /// Drops are immediate. Growth above the transport budget is limited to 15% per step.
     /// A successful application, rather than a Busy attempt, starts the cooldown.
     pub fn target(&self, now_ms: u64) -> Option<u32> {
         self.target_with_minimum_interval(now_ms, 0)
@@ -187,10 +188,13 @@ impl RateRamp {
             {
                 return None;
             }
-            self.requested.min(
-                self.applied
-                    .saturating_add((self.applied / 100 * 15).max(1)),
-            )
+            // Follow measured capacity after the cooldown. Advancing only 15% after a
+            // successful probe can leave the link underused until the new estimate expires.
+            let next_floor_step = self
+                .applied
+                .saturating_add((self.applied / 100 * 15).max(1));
+            self.requested
+                .min(self.transport_budget.max(next_floor_step))
         };
         // The deadband suppresses estimator noise, but must not leave recovery
         // permanently just below the cap (or congestion just above the floor).
@@ -362,19 +366,25 @@ mod tests {
     }
 
     #[test]
-    fn recovery_is_bounded_and_eventually_reaches_cap_without_oscillation() {
+    fn recovery_uses_the_transport_budget_without_waiting_for_floor_steps() {
         let mut ramp = RateRamp::new(18_000_000, 250_000);
         ramp.applied(2_000_000, 0);
-        ramp.request(u64::MAX);
+        ramp.request(11_682_000);
         assert_eq!(ramp.target(999), None);
-        assert_eq!(ramp.target(1000), Some(2_300_000));
-        for now in (1000..40_000).step_by(1000) {
-            if let Some(target) = ramp.target(now) {
-                ramp.applied(target, now);
-            }
-        }
-        assert_eq!(ramp.applied, 18_000_000);
-        assert_eq!(ramp.target(40_000), None);
+        assert_eq!(ramp.target(1000), Some(9_345_600));
+        ramp.applied(9_345_600, 1000);
+        ramp.request(1_696_000);
+        assert_eq!(ramp.target(1001), Some(1_356_800));
+    }
+
+    #[test]
+    fn unconfirmed_floor_still_rises_in_small_steps() {
+        let mut ramp = RateRamp::new(14_000_000, 1_000_000);
+        ramp.request_at(14_000_000, 0);
+        ramp.request_at(500_000, 1000);
+        ramp.applied(1_000_000, 1000);
+        ramp.request_at(500_000, 3000);
+        assert_eq!(ramp.target(3000), Some(1_150_000));
     }
 
     #[test]
@@ -448,16 +458,16 @@ mod tests {
             ramp.target_paced(21_000, RatePacing::REOPEN),
             Some(1_600_000)
         );
-        // Recovery: 5 s wait, then 15% steps that clear the 10% deadband up to the cap.
+        // Recovery: 5 s wait, then one reopen if the transport budget supports the cap.
         ramp.applied(1_600_000, 21_000);
         ramp.request(u64::MAX);
         assert_eq!(ramp.target_paced(25_999, RatePacing::REOPEN), None);
-        let mut now = 26_000;
-        while let Some(target) = ramp.target_paced(now, RatePacing::REOPEN) {
-            ramp.applied(target, now);
-            now += 5000;
-        }
-        assert_eq!(ramp.applied, 18_000_000);
+        assert_eq!(
+            ramp.target_paced(26_000, RatePacing::REOPEN),
+            Some(18_000_000)
+        );
+        ramp.applied(18_000_000, 26_000);
+        assert_eq!(ramp.target_paced(31_000, RatePacing::REOPEN), None);
     }
 
     #[test]
