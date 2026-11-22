@@ -28,6 +28,7 @@ pub struct Live {
     rate_origin: std::time::Instant,
     last_bps: u32,
     fps: FrameRate,
+    native_fps: FrameRate,
     frequency: i64,
     keyframe_requests: u64,
     keyframes_forced: u64,
@@ -190,6 +191,8 @@ struct StarvedProbe {
 const STARVED_WARMUP_S: u64 = 10;
 const STARVED_MIN_INTERVAL_S: u64 = 10;
 const STARVED_MAX_INTERVAL_S: u64 = 300;
+const STARVED_REDUCED_MAX_INTERVAL_S: u64 = 12;
+const REDUCED_ACTIVE_BPS: u64 = 300_000;
 
 impl StarvedProbe {
     fn new(now: std::time::Instant) -> Self {
@@ -215,6 +218,7 @@ impl StarvedProbe {
         request_bps: u64,
         cap_bps: u32,
         now: std::time::Instant,
+        reduced_quality: bool,
     ) -> bool {
         let second = now.saturating_duration_since(self.origin).as_secs();
         if second != self.second {
@@ -230,12 +234,22 @@ impl StarvedProbe {
         self.bytes_now = self.bytes_now.saturating_add(au_bytes);
         let produced_bps = (self.bytes_done[0] + self.bytes_done[1]) * 8 / 2;
         let saturated = produced_bps * 10 >= u64::from(applied_bps) * 6;
-        let starved = request_bps > 0 && request_bps * 2 < u64::from(cap_bps);
-        if second < STARVED_WARMUP_S || !saturated || !starved {
+        let reduced_and_active = reduced_quality && produced_bps >= REDUCED_ACTIVE_BPS;
+        let cap = u64::from(cap_bps);
+        let starved = request_bps > 0
+            && (request_bps < cap / 2 || (reduced_and_active && request_bps < cap * 9 / 10));
+        if second < STARVED_WARMUP_S || !(saturated || reduced_and_active) || !starved {
             return false;
         }
         if let Some((at, before_bps)) = self.last_probe {
-            if now.saturating_duration_since(at).as_secs() < self.interval_s {
+            // A saída reduzida pode não preencher o orçamento e o GCC fica sem sinal
+            // da banda restaurada. A 3 Mbps, a espera de 40 s manteve 720p após o corte.
+            let interval = if reduced_and_active {
+                self.interval_s.min(STARVED_REDUCED_MAX_INTERVAL_S)
+            } else {
+                self.interval_s
+            };
+            if now.saturating_duration_since(at).as_secs() < interval {
                 return false;
             }
             self.interval_s = if request_bps * 4 >= before_bps * 5 {
@@ -304,6 +318,7 @@ impl DiagnosticWindow {
 /// e uma rajada de IDRs de 1080p degrada a estimativa de banda e o bitrate efetivo.
 const MIN_KEYFRAME_INTERVAL_S: f64 = 0.5;
 const MIN_BITRATE_BPS: u64 = 1_000_000;
+const NETWORK_QUALITY_MIN_BITRATE_BPS: u32 = 500_000;
 
 impl Live {
     /// O refino de tela parada ainda tem repetições a fazer.
@@ -440,6 +455,7 @@ impl Live {
         publisher.spawn_stats_logger(std::time::Duration::from_secs(5));
         let audio_gate = madscreen_audio::mixer::MuteGate::default();
         let audio = start_audio(options, publisher.as_ref(), &audio_gate);
+        let network_quality = governor_enabled && !governor_cpu_signals;
         Ok(Self {
             publisher,
             lab_bitstream: options
@@ -467,13 +483,18 @@ impl Live {
                 || {
                     madscreen_encode::rate::RateRamp::new(
                         config.bitrate_bps,
-                        options.min_bitrate.unwrap_or(MIN_BITRATE_BPS as u32),
+                        options.min_bitrate.unwrap_or(if network_quality {
+                            NETWORK_QUALITY_MIN_BITRATE_BPS
+                        } else {
+                            MIN_BITRATE_BPS as u32
+                        }),
                     )
                 },
             ),
             rate_origin: std::time::Instant::now(),
             last_bps: config.bitrate_bps,
             fps: config.fps,
+            native_fps: config.fps,
             frequency: qpc_frequency()?,
             keyframe_requests: 0,
             keyframes_forced: 0,
@@ -492,12 +513,16 @@ impl Live {
             fps_dirty: false,
             diagnostic: options.diagnostics.then(DiagnosticWindow::new),
             governor: governor_enabled.then(|| {
-                let governor =
-                    LoadGovernor::new(config.fps.as_f64().ceil() as u32, config.height > 720, 0);
-                if governor_cpu_signals {
-                    governor
+                let fps = config.fps.as_f64().ceil() as u32;
+                if network_quality {
+                    LoadGovernor::network_quality(
+                        config.width,
+                        config.height,
+                        fps,
+                        config.bitrate_bps,
+                    )
                 } else {
-                    governor.rate_only()
+                    LoadGovernor::new(fps, config.height > 720, 0)
                 }
             }),
             governor_wait_max_ms: 0.,
@@ -706,6 +731,9 @@ impl Live {
                 self.last_request_bps,
                 self.cap_bps,
                 std::time::Instant::now(),
+                self.governor
+                    .as_ref()
+                    .is_some_and(LoadGovernor::network_quality_reduced),
             )
         {
             self.publisher.request_probe();
@@ -720,9 +748,17 @@ impl Live {
             u64::try_from(self.rate_origin.elapsed().as_millis()).unwrap_or(u64::MAX)
         });
         if let Some(ramp) = self.rate_ramp.as_mut() {
-            // Todo quadro: o WebRTC só avisa mudanças, e o piso sobe em degraus pelo relógio.
             if self.last_request_bps > 0 {
-                ramp.request_at(self.last_request_bps, rate_now_ms);
+                if self
+                    .governor
+                    .as_ref()
+                    .is_some_and(LoadGovernor::is_network_quality)
+                {
+                    // O modo adaptativo cabe na banda do degrau e sonda pelo transporte.
+                    ramp.request(self.last_request_bps);
+                } else {
+                    ramp.request_at(self.last_request_bps, rate_now_ms);
+                }
             }
             use madscreen_encode::{backend::BackendKind, rate::RatePacing};
             let pacing = if encoder.rate_change_reopens() {
@@ -832,16 +868,23 @@ impl Live {
             produced_bps,
         });
         // Sem isto o encoder segue orçando taxa/60 por quadro e produz metade do alvo a 30 FPS.
-        if let Some(target) = changed
-            && let Ok(fps) = FrameRate::new(target.fps, 1)
-        {
-            self.fps = fps;
-            self.fps_dirty = true;
+        if let Some(target) = changed {
+            let fps = if target.fps == self.native_fps.as_f64().ceil() as u32 {
+                Some(self.native_fps)
+            } else {
+                FrameRate::new(target.fps, 1).ok()
+            };
+            if let Some(fps) = fps {
+                self.fps_dirty |= fps != self.fps;
+                self.fps = fps;
+            }
         }
         changed
     }
     pub fn disable_governor(&mut self) {
         self.governor = None;
+        self.fps_dirty |= self.fps != self.native_fps;
+        self.fps = self.native_fps;
     }
     /// Última taxa aceita pelo encoder; um encoder recriado deve começar dela, não do teto.
     pub fn applied_bitrate_bps(&self) -> u32 {
@@ -1095,6 +1138,14 @@ mod starved_probe_tests {
 
     /// 60 AU/s; `at(segundo)` devolve (bps produzidos, taxa aplicada, pedido). Segundos com sondagem.
     fn run(until_s: u64, at: impl Fn(u64) -> (u64, u32, u64)) -> Vec<u64> {
+        run_with_quality(until_s, at, false)
+    }
+
+    fn run_with_quality(
+        until_s: u64,
+        at: impl Fn(u64) -> (u64, u32, u64),
+        reduced_quality: bool,
+    ) -> Vec<u64> {
         let t0 = Instant::now();
         let mut probe = StarvedProbe::new(t0);
         let mut probes = Vec::new();
@@ -1102,7 +1153,14 @@ mod starved_probe_tests {
             let second = frame / 60;
             let (produced, applied, request) = at(second);
             let now = t0 + Duration::from_micros(frame * 1_000_000 / 60);
-            if probe.due(produced / 8 / 60, applied, request, CAP, now) {
+            if probe.due(
+                produced / 8 / 60,
+                applied,
+                request,
+                CAP,
+                now,
+                reduced_quality,
+            ) {
                 probes.push(second);
             }
         }
@@ -1147,5 +1205,20 @@ mod starved_probe_tests {
             (request, request as u32, request)
         });
         assert_eq!(probes, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn reduced_quality_probes_periodically_even_when_active_video_underfills_the_budget() {
+        let trace = |_| (850_000, 1_800_000, 2_158_000);
+        assert_eq!(run_with_quality(60, trace, true), vec![10, 20, 32, 44, 56]);
+        assert!(run(60, trace).is_empty());
+        assert_eq!(
+            run_with_quality(25, |_| (850_000, 6_400_000, 8_000_000), true),
+            vec![10, 20]
+        );
+        assert_eq!(
+            run_with_quality(60, |_| (100_000, 1_800_000, 2_158_000), true),
+            Vec::<u64>::new()
+        );
     }
 }

@@ -475,13 +475,18 @@ impl Options {
         kind: madscreen_encode::backend::BackendKind,
         compat_tuning: bool,
     ) -> bool {
-        // NVENC fica no degrau nativo (como até a 0.1.16): no lab de 10/nov o governador deixou a
-        // live 50 s em 540p30 depois da banda voltar (37 FPS contra 59 sem ele). Opt-in com
-        // --load-governor; nos backends de compatibilidade ele protege CPU e jogo.
-        compat_tuning && !self.no_load_governor && self.governor_cpu_signals(kind)
+        compat_tuning
+            && !self.no_load_governor
+            && (self.adaptive_nvenc(kind) || self.governor_cpu_signals(kind))
     }
     pub fn governor_cpu_signals(&self, kind: madscreen_encode::backend::BackendKind) -> bool {
-        self.load_governor || madscreen_encode::config::compatibility_backend(kind)
+        (self.load_governor && !self.adaptive_nvenc(kind))
+            || madscreen_encode::config::compatibility_backend(kind)
+    }
+    fn adaptive_nvenc(&self, kind: madscreen_encode::backend::BackendKind) -> bool {
+        kind == madscreen_encode::backend::BackendKind::Nvenc
+            && matches!(self.codec, CodecArg::H264)
+            && self.rate_policy == RatePolicyArg::AbsoluteRamp
     }
     pub fn from_cli_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
         let mut options = <Self as clap::FromArgMatches>::from_arg_matches(matches)?;
@@ -620,12 +625,12 @@ mod tests {
         let compat = madscreen_encode::backend::BackendKind::X264;
         let nvenc = madscreen_encode::backend::BackendKind::Nvenc;
         assert!(defaults.governor_enabled(compat, true));
-        assert!(!defaults.governor_enabled(nvenc, true));
+        assert!(defaults.governor_enabled(nvenc, true));
         assert!(!defaults.governor_enabled(compat, false));
         assert!(experimental.governor_enabled(nvenc, true));
         assert!(defaults.governor_cpu_signals(compat));
         assert!(!defaults.governor_cpu_signals(nvenc));
-        assert!(experimental.governor_cpu_signals(nvenc));
+        assert!(!experimental.governor_cpu_signals(nvenc));
         let disabled = Options::try_parse_from([
             "encode",
             "--no-load-governor",
@@ -635,6 +640,7 @@ mod tests {
             "--x264-ultrafast",
         ])?;
         assert!(!disabled.governor_enabled(compat, true));
+        assert!(!disabled.governor_enabled(nvenc, true));
         let disabled_config = disabled.config(1920, 1080, Preset::P1)?;
         assert_eq!(disabled_config.async_readback_override, Some(false));
         assert_eq!(disabled_config.compat_vbv_frames, Some(1));

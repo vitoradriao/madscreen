@@ -21,9 +21,9 @@ impl ResolutionStep {
 pub enum ChangeReason {
     SustainedOverload,
     SustainedHealth,
-    /// O encoder produziu bem mais que a taxa pedida pelo WebRTC: o degrau não cabe na banda.
+    /// A taxa pedida pelo WebRTC ficou abaixo da necessidade do degrau atual.
     BandwidthOverload,
-    /// Subida depois de limite por banda: a banda pedida dobrou ou venceu a espera da nova tentativa.
+    /// Subida depois de limite por banda.
     BandwidthRecovery,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +72,18 @@ const RATE_RETRY_MAX_MS: u64 = 300_000;
 // x264 uses two worker threads: 1.6 cores is 80% of that encoder budget.
 const PROCESS_OVERLOAD_CORES: f64 = 1.6;
 const PROCESS_HEALTHY_CORES: f64 = 1.2;
+const QUALITY_WINDOWS: u32 = 3;
+const QUALITY_DWELL_MS: u64 = 4_000;
+// Pontos de partida conservadores para H.264 em movimento, escalados por pixels/s.
+const NATIVE_REFERENCE_BPS: u64 = 5_000_000;
+const HD720_REFERENCE_BPS: u64 = 1_800_000;
+
+struct NetworkQuality {
+    down_bps: [u64; 2],
+    pending: Option<usize>,
+    streak: u32,
+}
+
 pub struct LoadGovernor {
     steps: Vec<Target>,
     current: usize,
@@ -89,6 +101,7 @@ pub struct LoadGovernor {
     /// um degrau quando o WebRTC pedir mais que isso (ou na nova tentativa).
     rate_need_bps: Vec<Option<u64>>,
     rate_retry_ms: u64,
+    network_quality: Option<NetworkQuality>,
 }
 impl LoadGovernor {
     pub fn new(configured_fps: u32, can_reduce_resolution: bool, at_ms: u64) -> Self {
@@ -118,6 +131,10 @@ impl LoadGovernor {
                 });
             }
         }
+        Self::with_steps(steps, at_ms)
+    }
+
+    fn with_steps(steps: Vec<Target>, at_ms: u64) -> Self {
         let spent_ms = vec![0; steps.len()];
         let rate_need_bps = vec![None; steps.len()];
         Self {
@@ -134,9 +151,55 @@ impl LoadGovernor {
             cpu_signals: true,
             rate_need_bps,
             rate_retry_ms: RATE_RETRY_FIRST_MS,
+            network_quality: None,
         }
     }
-    /// Só a banda governa (NVENC): CPU e fila do encoder não são sinais confiáveis ali.
+
+    pub fn network_quality(width: u32, height: u32, fps: u32, cap_bps: u32) -> Self {
+        let mut steps = vec![Target {
+            fps,
+            resolution: ResolutionStep::Native,
+        }];
+        let width_at = |target_height: u32| {
+            u64::from(width) * u64::from(target_height) / u64::from(height.max(1))
+        };
+        if height > 720 && width_at(720) >= 160 {
+            steps.push(Target {
+                fps: fps.min(60),
+                resolution: ResolutionStep::Hd720,
+            });
+        }
+        if height > 540 && width_at(540) >= 160 {
+            steps.push(Target {
+                fps: fps.min(30),
+                resolution: ResolutionStep::Hd540,
+            });
+        } else if fps > 30 {
+            steps.push(Target {
+                fps: 30,
+                resolution: ResolutionStep::Native,
+            });
+        }
+        let native = NATIVE_REFERENCE_BPS
+            .saturating_mul(u64::from(width) * u64::from(height))
+            .saturating_mul(u64::from(fps))
+            / (1920 * 1080 * 60);
+        let hd = HD720_REFERENCE_BPS.saturating_mul(width_at(720) * u64::from(fps.min(60)))
+            / (1280 * 60);
+        let cap = u64::from(cap_bps);
+        let mut governor = Self::with_steps(steps, 0);
+        governor.network_quality = Some(NetworkQuality {
+            down_bps: [
+                native.clamp(600_000, 12_000_000).min(cap * 7 / 10),
+                hd.clamp(650_000, 5_000_000).min(cap / 2),
+            ],
+            pending: None,
+            streak: 0,
+        });
+        governor
+    }
+
+    #[cfg(test)]
     pub fn rate_only(mut self) -> Self {
         self.cpu_signals = false;
         self
@@ -144,6 +207,15 @@ impl LoadGovernor {
     pub fn target(&self) -> Target {
         self.steps[self.current]
     }
+
+    pub fn is_network_quality(&self) -> bool {
+        self.network_quality.is_some()
+    }
+
+    pub fn network_quality_reduced(&self) -> bool {
+        self.is_network_quality() && self.current != 0
+    }
+
     pub fn diagnostics(&self, now_ms: u64) -> Diagnostics {
         let mut time_at_step_ms = self.spent_ms.clone();
         time_at_step_ms[self.current] = time_at_step_ms[self.current]
@@ -163,6 +235,9 @@ impl LoadGovernor {
                 .is_some_and(|elapsed| (MIN_WINDOW_MS..=MAX_WINDOW_MS).contains(&elapsed))
         });
         self.last_window_ms = Some(sample.at_ms);
+        if self.network_quality.is_some() {
+            return self.observe_network_quality(sample, valid_time);
+        }
         if !valid_time || sample.captured == 0 || sample.submitted > sample.captured {
             self.overload_streak = 0;
             self.health_streak = 0;
@@ -264,15 +339,74 @@ impl LoadGovernor {
             } else {
                 None
             }?;
-        self.spent_ms[self.current] = self.spent_ms[self.current]
-            .saturating_add(sample.at_ms.saturating_sub(self.at_step_since_ms));
-        self.current = next;
-        self.at_step_since_ms = sample.at_ms;
         self.changes.push(sample.at_ms);
+        Some(self.change_step(next, sample.at_ms))
+    }
+
+    fn observe_network_quality(&mut self, sample: Window, valid_time: bool) -> Option<Target> {
+        let quality = self.network_quality.as_mut()?;
+        let next =
+            if let Some(requested) = sample.requested_bps.filter(|&rate| rate > 0 && valid_time) {
+                let active = sample.produced_bps.is_some_and(|produced| {
+                    produced >= RATE_MIN_PRODUCED_BPS && produced >= requested / 2
+                });
+                let can_reduce = active
+                    && self.current + 1 < self.steps.len()
+                    && requested < quality.down_bps[self.current];
+                if can_reduce {
+                    let mut next = self.current + 1;
+                    if next + 1 < self.steps.len() && requested < quality.down_bps[next] {
+                        next += 1;
+                    }
+                    Some(next)
+                } else {
+                    // Recover directly to the best affordable rung after sustained headroom.
+                    // The downgrade budget must never hold a healthy link at low resolution.
+                    (0..self.current).find(|&step| requested >= quality.down_bps[step] * 5 / 4)
+                }
+            } else {
+                None
+            };
+        quality.streak = match next {
+            Some(_) if next == quality.pending => quality.streak.saturating_add(1),
+            Some(_) => 1,
+            None => 0,
+        };
+        quality.pending = next;
+        let next = next?;
+        if quality.streak < QUALITY_WINDOWS
+            || sample.at_ms.saturating_sub(self.at_step_since_ms) < QUALITY_DWELL_MS
+        {
+            return None;
+        }
+        let downgrade = next > self.current;
+        self.changes
+            .retain(|at| sample.at_ms.saturating_sub(*at) < 60_000);
+        if downgrade && self.changes.len() >= MAX_CHANGES_PER_MINUTE {
+            return None;
+        }
+        quality.pending = None;
+        quality.streak = 0;
+        self.last_reason = Some(if downgrade {
+            ChangeReason::BandwidthOverload
+        } else {
+            ChangeReason::BandwidthRecovery
+        });
+        if downgrade {
+            self.changes.push(sample.at_ms);
+        }
+        Some(self.change_step(next, sample.at_ms))
+    }
+
+    fn change_step(&mut self, next: usize, at_ms: u64) -> Target {
+        self.spent_ms[self.current] =
+            self.spent_ms[self.current].saturating_add(at_ms.saturating_sub(self.at_step_since_ms));
+        self.current = next;
+        self.at_step_since_ms = at_ms;
         self.change_count += 1;
         self.overload_streak = 0;
         self.health_streak = 0;
-        Some(self.target())
+        self.target()
     }
 }
 fn valid_percent(value: f64) -> bool {
@@ -306,6 +440,102 @@ mod tests {
             requested_bps: Some(requested),
             produced_bps: Some(produced),
         }
+    }
+    #[test]
+    fn network_quality_keeps_fps_at_three_megabits_and_restores_native_on_headroom() {
+        let mut governor = LoadGovernor::network_quality(1920, 1080, 60, 14_000_000);
+        for t in 1..=6 {
+            assert_eq!(
+                governor.observe(rate(t * 1000, 13_676_000, 12_000_000)),
+                None
+            );
+        }
+        for t in 7..=9 {
+            governor.observe(rate(t * 1000, 3_000_000, 2_000_000));
+        }
+        assert_eq!(
+            governor.target(),
+            Target {
+                fps: 60,
+                resolution: ResolutionStep::Hd720
+            }
+        );
+        for t in 10..=14 {
+            assert_eq!(governor.observe(rate(t * 1000, 5_300_000, 2_000_000)), None);
+        }
+        for t in 15..=17 {
+            governor.observe(rate(t * 1000, 6_500_000, 1_800_000));
+        }
+        assert_eq!(
+            governor.target(),
+            Target {
+                fps: 60,
+                resolution: ResolutionStep::Native
+            }
+        );
+    }
+
+    #[test]
+    fn network_quality_restore_bypasses_a_full_downgrade_budget() {
+        let mut governor = LoadGovernor::network_quality(1920, 1080, 60, 14_000_000);
+        // A short dip and idle content do not justify changing format.
+        for t in 1..=5 {
+            governor.observe(rate(t * 1000, 300_000, 50_000));
+        }
+        governor.observe(rate(6000, 300_000, 850_000));
+        governor.observe(rate(7000, 14_000_000, 10_000_000));
+        assert_eq!(governor.target().resolution, ResolutionStep::Native);
+        for start in [9, 20, 31] {
+            for t in start - 1..start {
+                governor.observe(rate(t * 1000, 14_000_000, 10_000_000));
+            }
+            for t in start..start + 3 {
+                governor.observe(rate(t * 1000, 30_000, 850_000));
+            }
+            assert_eq!(
+                governor.target(),
+                Target {
+                    fps: 30,
+                    resolution: ResolutionStep::Hd540
+                }
+            );
+            for t in start + 3..=start + 6 {
+                governor.observe(rate(t * 1000, 13_676_000, 550_000));
+            }
+            assert_eq!(
+                governor.target(),
+                Target {
+                    fps: 60,
+                    resolution: ResolutionStep::Native
+                }
+            );
+        }
+        assert_eq!(governor.diagnostics(38_000).change_count, 6);
+    }
+
+    #[test]
+    fn network_quality_honors_a_small_source_and_low_configured_cap() {
+        let mut governor = LoadGovernor::network_quality(800, 450, 60, 2_000_000);
+        for t in 1..=6 {
+            governor.observe(rate(t * 1000, 300_000, 500_000));
+        }
+        assert_eq!(
+            governor.target(),
+            Target {
+                fps: 30,
+                resolution: ResolutionStep::Native
+            }
+        );
+        for t in 7..=10 {
+            governor.observe(rate(t * 1000, 1_950_000, 400_000));
+        }
+        assert_eq!(
+            governor.target(),
+            Target {
+                fps: 60,
+                resolution: ResolutionStep::Native
+            }
+        );
     }
     #[test]
     fn nvenc_rate_only_ignores_capture_above_target_and_cpu() {

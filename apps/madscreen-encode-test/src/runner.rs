@@ -1270,7 +1270,7 @@ pub(crate) fn run_profile(
                     requested_config.clone(),
                     next_converter.textures(),
                     input == InputFormat::Bgra,
-                    options.encoder.requested(),
+                    Some(encoder_kind),
                 )?;
                 let effective = madscreen_encode::config::effective_config(
                     next_encoder.kind(),
@@ -1291,7 +1291,9 @@ pub(crate) fn run_profile(
                     encoder = next_encoder;
                     encoder_kind = encoder.kind();
                     config = effective;
-                    if !options.governor_enabled(encoder_kind, config.compat_tuning) {
+                    if !options.governor_enabled(encoder_kind, config.compat_tuning)
+                        || governor_cpu_signals != options.governor_cpu_signals(encoder_kind)
+                    {
                         collector.output.disable_governor();
                         governor_enabled = false;
                         restore_capture_cadence(
@@ -1476,9 +1478,13 @@ pub(crate) fn run_profile(
                 let captured = captured_total
                     .saturating_sub(governor_last_captured)
                     .max(submitted);
-                let process_cpu_cores = governor_cpu
-                    .sample()
-                    .map(|percent| percent * logical_cpus / 100.);
+                let process_cpu_cores = if governor_cpu_signals {
+                    governor_cpu
+                        .sample()
+                        .map(|percent| percent * logical_cpus / 100.)
+                } else {
+                    None
+                };
                 let changed =
                     collector
                         .output
@@ -1487,7 +1493,11 @@ pub(crate) fn run_profile(
                 governor_last_captured = captured_total;
                 governor_last_submitted = produced;
                 if let Some(target) = changed {
-                    capture_fps = FrameRate::new(target.fps, 1)?;
+                    capture_fps = if target.fps == base_config.fps.as_f64().ceil() as u32 {
+                        base_config.fps
+                    } else {
+                        FrameRate::new(target.fps, 1)?
+                    };
                     capture_period = (i128::from(frequency) * i128::from(capture_fps.den)
                         / i128::from(capture_fps.num))
                     .clamp(1, i128::from(i64::MAX)) as i64;
@@ -1579,7 +1589,11 @@ pub(crate) fn run_profile(
                     if rollback {
                         "MADSCREEN_COMPAT_TUNING=off"
                     } else if governor_enabled {
-                        "compatibilidade ou opt-in CLI"
+                        if encoder_kind == BackendKind::Nvenc {
+                            "qualidade adaptativa por banda"
+                        } else {
+                            "compatibilidade ou opt-in CLI"
+                        }
                     } else {
                         "backend excluido, opt-out ou falha de recriacao"
                     },
