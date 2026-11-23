@@ -45,10 +45,7 @@ impl StaticRefine {
         let refinement = self.requested_at_ms.take().is_some() && !keyframe;
         if keyframe {
             // Todo IDR (repouso, PLI, keepalive) recomeça o refino da imagem atual.
-            self.remaining = REFINE_FRAMES;
-            self.settled = false;
-            self.content_since_keyframe = false;
-            self.repeats = 0;
+            self.restart();
         } else if refinement {
             self.frames += 1;
             self.repeats += 1;
@@ -72,6 +69,16 @@ impl StaticRefine {
             self.remaining = 1;
             self.settled = false;
         }
+    }
+
+    /// Recomeça o refino da imagem atual sem IDR. No LiveKit a tela que para é refinada como P:
+    /// o IDR de repouso saía limitado ao VBV de um quadro (QP 40–45 sob carga, 23/nov) e, a cada
+    /// pequena mudança, a imagem voltava a ficar em blocos antes de refinar de novo.
+    pub fn restart(&mut self) {
+        self.remaining = REFINE_FRAMES;
+        self.settled = false;
+        self.content_since_keyframe = false;
+        self.repeats = 0;
     }
 
     /// Há repetições pendentes: o laço de captura precisa acordar no ritmo do refino.
@@ -125,6 +132,21 @@ mod tests {
             }
         }
         (repeats, now)
+    }
+
+    #[test]
+    fn restart_refines_settled_content_without_a_keyframe() {
+        let mut refine = StaticRefine::new();
+        refine.on_access_unit(true);
+        assert!(!refine.on_access_unit(false), "conteúdo novo não é refino");
+        assert!(refine.content_since_keyframe());
+        refine.restart();
+        assert!(
+            !refine.content_since_keyframe(),
+            "não rearma o repouso a cada refino"
+        );
+        let (repeats, _) = drain(&mut refine, 0, 16);
+        assert_eq!(repeats, REFINE_FRAMES);
     }
 
     #[test]

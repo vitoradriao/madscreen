@@ -581,12 +581,15 @@ impl Live {
         let idle_s = self
             .last_au
             .map_or(0., |at| (now - at).max(0) as f64 / self.frequency as f64);
-        // Repetições de refino não contam como conteúdo: não rearmam o IDR de repouso.
-        self.force_keyframe(
-            encoder,
-            now,
-            self.refine.content_since_keyframe() && idle_s >= 1.,
-        );
+        // Repetições de refino não contam como conteúdo: não rearmam o repouso.
+        let settled = self.refine.content_since_keyframe() && idle_s >= 1.;
+        // O IDR de repouso era keepalive do transporte Cloudflare. No LiveKit, espectador novo ou
+        // com perda recebe IDR pelo PLI; a tela parada é refinada como P, sem passar por blocos.
+        let idle_keyframe = self.publisher.provider() != "livekit";
+        if settled && !idle_keyframe {
+            self.refine.restart();
+        }
+        self.force_keyframe(encoder, now, settled && idle_keyframe);
         let redraw_after_s = (2. * self.fps.den as f64 / self.fps.num as f64).max(0.05);
         if self.keyframe_armed && !self.redraw_requested && idle_s >= redraw_after_s {
             self.redraw_requested = true;
