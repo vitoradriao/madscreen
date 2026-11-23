@@ -366,28 +366,11 @@ impl Live {
                     max_bitrate_bps: u64::from(config.bitrate_bps),
                     max_fps: config.fps.num as f64 / config.fps.den as f64,
                     audio: options.audio_requested(),
-                    preferred_h264_profile: {
-                        // Explicit laboratory opt-in; never change the product default.
-                        let codec44_local_high = std::env::var("MADSCREEN_CODEC44_LOCAL_HIGH")
-                            .is_ok_and(|value| value == "1");
-                        if codec44_local_high {
-                            anyhow::ensure!(
-                                options.livekit_url.as_deref() == Some("ws://127.0.0.1:17880")
-                                    && matches!(
-                                        config.h264_profile,
-                                        madscreen_encode::config::H264Profile::High
-                                    ),
-                                "MADSCREEN_CODEC44_LOCAL_HIGH=1 exige SFU local ws://127.0.0.1:17880 e --h264-profile high"
-                            );
-                            Some("6400".into())
-                        } else {
-                            match config.h264_profile {
-                                madscreen_encode::config::H264Profile::Main => Some("4d00".into()),
-                                madscreen_encode::config::H264Profile::ConstrainedBaseline => {
-                                    Some("42e0".into())
-                                }
-                                _ => None,
-                            }
+                    preferred_h264_profile: match config.h264_profile {
+                        madscreen_encode::config::H264Profile::High => Some("6400".into()),
+                        madscreen_encode::config::H264Profile::Main => Some("4d00".into()),
+                        madscreen_encode::config::H264Profile::ConstrainedBaseline => {
+                            Some("42e0".into())
                         }
                     },
                     h264_level_idc: config.h264_level,

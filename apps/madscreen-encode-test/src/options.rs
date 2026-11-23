@@ -252,12 +252,12 @@ pub struct Options {
     pub source: Source,
     #[arg(long, value_enum, default_value = "h264")]
     pub codec: CodecArg,
-    /// Laboratorio: perfil real do encoder, nao apenas alteracao de SDP.
+    /// Perfil real do encoder, anunciado no SDP. High desde 23/nov: o LiveKit da Magalu casa o perfil.
     #[arg(
         long,
         env = "MADSCREEN_H264_PROFILE",
         value_enum,
-        default_value = "constrained-baseline"
+        default_value = "high"
     )]
     pub h264_profile: H264ProfileArg,
     #[arg(long, value_enum, default_value = "p1")]
@@ -794,7 +794,10 @@ mod tests {
         assert!(!explicit.bitrate_auto);
         let mut config = explicit.config(1280, 720, Preset::P1)?;
         assert_eq!(config.bitrate_bps, 18_000_000);
-        assert_eq!(config.clamp_h264_bitrate(), Some((18_000_000, 14_000_000)));
+        // High (padrão) segue o nível planejado; sem ele o driver escolhe e não há corte aqui.
+        assert_eq!(config.clamp_h264_bitrate(), None);
+        config.h264_level = Some(31);
+        assert_eq!(config.clamp_h264_bitrate(), Some((18_000_000, 17_500_000)));
         Ok(())
     }
 }

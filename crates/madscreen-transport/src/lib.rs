@@ -42,10 +42,14 @@ pub struct PublishConfig {
     pub h264_level_idc: Option<u32>,
 }
 
+/// Constrained Baseline e High: o LiveKit da Magalu casa High pelo perfil desde 23/nov
+/// (`tools/bench/codec44-allow-high-server.patch`); um SFU sem o patch rotula High como Baseline.
 fn validate_profile(preferred: Option<&str>) -> Result<()> {
     anyhow::ensure!(
-        preferred.is_none_or(|profile| profile.eq_ignore_ascii_case("42e0")),
-        "perfil H.264 experimental nao qualificado na Magalu; use constrained-baseline no laboratorio"
+        preferred.is_none_or(|profile| {
+            profile.eq_ignore_ascii_case("42e0") || profile.eq_ignore_ascii_case("6400")
+        }),
+        "perfil H.264 nao suportado na publicacao; use constrained-baseline ou high"
     );
     Ok(())
 }
@@ -114,7 +118,8 @@ mod profile_tests {
         assert!(super::validate_profile(None).is_ok()); // Legacy unchanged.
         assert!(super::validate_profile(Some("42e0")).is_ok());
         assert!(super::validate_profile(Some("42E0")).is_ok());
-        for rejected in ["4d00", "4D00", "6400", "42e01f", ""] {
+        assert!(super::validate_profile(Some("6400")).is_ok());
+        for rejected in ["4d00", "4D00", "640c", "42e01f", ""] {
             assert!(super::validate_profile(Some(rejected)).is_err());
         }
     }
@@ -306,13 +311,7 @@ impl AudioPusher {
 impl LiveKitPublisher {
     /// Conecta, cria a fonte pré-codificada (H.264) e publica a faixa de vídeo. Bloqueante.
     pub fn connect(config: &PublishConfig) -> Result<Self> {
-        // High capability rehearsal stays explicitly scoped to the exclusive local SFU.
-        // The product default and Magalu contract remain unchanged until end-to-end approval.
-        let local_high = config.url == "ws://127.0.0.1:17880"
-            && config.preferred_h264_profile.as_deref() == Some("6400");
-        if !local_high {
-            validate_profile(config.preferred_h264_profile.as_deref())?;
-        }
+        validate_profile(config.preferred_h264_profile.as_deref())?;
         let mut level_idc = None;
         if config.preferred_h264_profile.is_some() {
             level_idc = Some(validate_cb_level(
