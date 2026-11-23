@@ -2,6 +2,12 @@
 #![allow(unsafe_code)]
 use crate::{EncoderConfig, MultiPass, Result, VideoCodec, nvenc_sys::*, versions::*};
 
+/// Razão I/P permitida com VBV de um quadro. Com 1 (padrão do ULL) o IDR do início, do PLI e de
+/// quem entra saía do tamanho de um P: VMAF 21 a 4 Mbps (offline, 23/nov). Com 8 o IDR fica no
+/// nível do resto do vídeo (VMAF 80), a taxa média não muda (o multipass compensa nos P seguintes)
+/// e a rajada fica em ~6 quadros no ritmo alvo, saturando em ~124 KB no teto.
+pub const LOW_DELAY_KEYFRAME_SCALE: u8 = 8;
+
 pub fn apply_config(config: &EncoderConfig, native: &mut NV_ENC_CONFIG) -> Result<()> {
     config.validate()?;
     native.version = NV_ENC_CONFIG_VER;
@@ -21,7 +27,7 @@ pub fn apply_config(config: &EncoderConfig, native: &mut NV_ENC_CONFIG) -> Resul
     rc.lookaheadDepth = 0;
     rc.set_enableAQ(u32::from(config.spatial_aq));
     rc.set_enableTemporalAQ(0);
-    rc.lowDelayKeyFrameScale = 1;
+    rc.lowDelayKeyFrameScale = LOW_DELAY_KEYFRAME_SCALE;
     rc.multiPass = match config.multipass {
         MultiPass::Disabled => NV_ENC_MULTI_PASS_DISABLED,
         MultiPass::QuarterRes => NV_ENC_TWO_PASS_QUARTER_RESOLUTION,
@@ -224,6 +230,10 @@ mod tests {
             assert_eq!(native.gopLength, u32::MAX);
             assert_eq!(native.rcParams.vbvBufferSize, 125000);
             assert_eq!(native.rcParams.zeroReorderDelay(), 1);
+            assert_eq!(
+                native.rcParams.lowDelayKeyFrameScale,
+                LOW_DELAY_KEYFRAME_SCALE
+            );
             assert_eq!(native.rcParams.enableLookahead(), 0);
             assert_eq!(native.rcParams.enableAQ(), 0);
             assert_eq!(native.rcParams.enableTemporalAQ(), 0);

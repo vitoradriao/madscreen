@@ -367,7 +367,7 @@ Parâmetros sobre a **cópia do preset retornado pelo driver**, nunca sobre um
 | GOP / idrPeriod | infinito |
 | frameIntervalP / zeroReorderDelay | 1 / 1 |
 | Lookahead / external lookahead / AQ espacial e temporal | desativados |
-| multiPass / lowDelayKeyFrameScale | quarter resolution (CLI/app) / 1 |
+| multiPass / lowDelayKeyFrameScale | quarter resolution (CLI/app) / 8 (`docs/bench/idr-escala-2026-11-23.md`) |
 | Perfis | H.264 High; HEVC Main 8-bit; AV1 Main 8-bit, 4:2:0 |
 | Sequence headers | SPS/PPS (HEVC também VPS) repetidos em cada IDR; AV1 repeatSeqHdr |
 | Cores | BT.709 limited explicitamente sinalizado no bitstream |
