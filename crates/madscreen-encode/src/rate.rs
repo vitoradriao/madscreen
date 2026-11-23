@@ -90,15 +90,15 @@ impl RateRamp {
     }
 
     fn budget(&self, bps: u64) -> u64 {
-        // Transport feedback budgets packetized media. Reserve headroom for
-        // RTP/SRTP overhead, rate-estimator uncertainty and recovery keyframes.
+        // WebRTC already removes RTP overhead before SetRates (GetPayloadBitrateBps in
+        // video_send_stream_impl.cc). The former extra 20% left NVENC at ~60% of the estimate in
+        // game (Cyberpunk on Magalu, 21/nov), and GCC never grows past 1.5x what it receives.
+        // A request at the cap means the link has room (WebRTC clamps its estimate to ~97% of it).
         // Integer division first avoids overflow for untrusted/extreme feedback.
-        // A request at the cap means the link has room (WebRTC clamps its estimate to the
-        // cap, ~97% of it); discounting it would pin the encoder at 80% of the cap forever.
         if bps >= u64::from(self.cap) / 100 * 95 {
             u64::from(self.cap)
         } else {
-            bps / 100 * 80 + bps % 100 * 80 / 100
+            bps
         }
     }
 
@@ -214,9 +214,155 @@ impl RateRamp {
     }
 }
 
+/// Window over which the encoder output is compared with the rate it was running at.
+const FILL_WINDOW_MS: u64 = 1_000;
+/// Aim slightly below the WebRTC target: keyframes and estimator noise need room.
+const FILL_TARGET: f64 = 0.95;
+/// NVENC delivered 70–79% of the applied rate in game (21/nov); a larger gain would overshoot the
+/// link when the content suddenly fills the VBV.
+const FILL_MAX_GAIN: f64 = 1.35;
+/// Frames under half of their budget are limited by the content (static screen, menus), not by
+/// the rate control; such windows keep the gain for when motion returns.
+const FILL_CONTENT_LIMITED: f64 = 0.5;
+
+/// Closed-loop correction of encoder undershoot. GCC only raises its estimate up to 1.5x the
+/// throughput it sees (aimd_rate_control.cc), so an encoder delivering 75% of each request pins
+/// the estimate; scaling the request by the measured shortfall lets the estimate grow.
+#[derive(Debug)]
+pub struct FillGain {
+    gain: f64,
+    window_start_ms: Option<u64>,
+    last_ms: u64,
+    bits: f64,
+    frame_budget_bits: f64,
+    rate_bit_ms: f64,
+}
+
+impl Default for FillGain {
+    fn default() -> Self {
+        Self {
+            gain: 1.,
+            window_start_ms: None,
+            last_ms: 0,
+            bits: 0.,
+            frame_budget_bits: 0.,
+            rate_bit_ms: 0.,
+        }
+    }
+}
+
+impl FillGain {
+    pub fn gain(&self) -> f64 {
+        self.gain
+    }
+
+    /// Encoder ceiling for a configured `cap_bps`: at the cap NVENC still delivered 8–11 of
+    /// 14 Mbps in game (23/nov), so the correction must be able to ask for more than the cap.
+    pub fn ceiling(cap_bps: u32) -> u32 {
+        (f64::from(cap_bps) * FILL_MAX_GAIN) as u32
+    }
+
+    /// Rate to ask the encoder for so that it delivers about `bps` (float casts saturate).
+    pub fn apply(&self, bps: u64) -> u64 {
+        (bps as f64 * self.gain) as u64
+    }
+
+    /// One access unit of `bytes`, produced while the encoder ran at `encoder_bps` and `fps`.
+    pub fn observe(&mut self, bytes: usize, encoder_bps: u32, fps: f64, now_ms: u64) {
+        let Some(start) = self.window_start_ms else {
+            self.restart(now_ms);
+            return;
+        };
+        let elapsed = now_ms.saturating_sub(start);
+        if elapsed > 2 * FILL_WINDOW_MS {
+            // Capture paused: time without frames says nothing about the rate control.
+            self.restart(now_ms);
+            return;
+        }
+        self.rate_bit_ms += f64::from(encoder_bps) * now_ms.saturating_sub(self.last_ms) as f64;
+        self.last_ms = now_ms;
+        self.bits += bytes as f64 * 8.;
+        if fps > 0. {
+            self.frame_budget_bits += f64::from(encoder_bps) / fps;
+        }
+        if elapsed < FILL_WINDOW_MS {
+            return;
+        }
+        if self.frame_budget_bits > 0.
+            && self.rate_bit_ms > 0.
+            && self.bits / self.frame_budget_bits >= FILL_CONTENT_LIMITED
+        {
+            let efficiency = self.bits * 1000. / self.rate_bit_ms;
+            let wanted = (FILL_TARGET / efficiency).clamp(1., FILL_MAX_GAIN);
+            // Rise halfway per window, fall at once: overshooting the link costs more.
+            self.gain = if wanted > self.gain {
+                (self.gain + wanted) / 2.
+            } else {
+                wanted
+            };
+        }
+        self.restart(now_ms);
+    }
+
+    fn restart(&mut self, now_ms: u64) {
+        self.window_start_ms = Some(now_ms);
+        self.last_ms = now_ms;
+        self.bits = 0.;
+        self.frame_budget_bits = 0.;
+        self.rate_bit_ms = 0.;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::RateRamp;
+    use super::{FillGain, RateRamp};
+
+    /// Feeds `seconds` of 60 fps output where each frame is `fill` of its budget at `bps`.
+    fn feed(gain: &mut FillGain, bps: u32, fill: f64, from_ms: u64, seconds: u64) -> u64 {
+        for frame in 1..=seconds * 60 {
+            let bytes = (f64::from(bps) / 60. * fill / 8.) as usize;
+            gain.observe(bytes, bps, 60., from_ms + frame * 1000 / 60);
+        }
+        from_ms + seconds * 1000
+    }
+
+    #[test]
+    fn fill_gain_corrects_game_undershoot_and_holds_on_static_content() {
+        let mut gain = FillGain::default();
+        // NVENC at 75% of the applied rate (Cyberpunk on Magalu, 21/nov).
+        let mut now = feed(&mut gain, 4_000_000, 0.75, 0, 6);
+        assert!((gain.gain() - 0.95 / 0.75).abs() < 0.01, "{}", gain.gain());
+        assert_eq!(gain.apply(4_000_000), (4_000_000. * gain.gain()) as u64);
+        // Static screen: after the mixed transition window, tiny repeat frames say nothing
+        // about the rate control.
+        now = feed(&mut gain, 4_000_000, 0.02, now, 2);
+        let held = gain.gain();
+        assert!(held > 1.2, "{held}");
+        now = feed(&mut gain, 4_000_000, 0.02, now, 5);
+        assert_eq!(gain.gain(), held);
+        // Hard content filling the VBV: back to 1 within one window.
+        feed(&mut gain, 5_000_000, 1.0, now, 2);
+        assert_eq!(gain.gain(), 1.);
+    }
+
+    #[test]
+    fn fill_gain_is_bounded_and_ignores_pauses() {
+        let mut gain = FillGain::default();
+        feed(&mut gain, 8_000_000, 0.55, 0, 10);
+        assert!(
+            (gain.gain() - super::FILL_MAX_GAIN).abs() < 0.001,
+            "{}",
+            gain.gain()
+        );
+        // A 10 s capture pause followed by one full window keeps the measured efficiency only.
+        let mut paused = FillGain::default();
+        paused.observe(10_000, 8_000_000, 60., 0);
+        paused.observe(10_000, 8_000_000, 60., 10_000);
+        assert_eq!(paused.gain(), 1.);
+        assert_eq!(FillGain::default().apply(u64::MAX), u64::MAX);
+        assert_eq!(FillGain::ceiling(14_000_000), 18_900_000);
+        assert_eq!(FillGain::ceiling(u32::MAX), u32::MAX);
+    }
 
     #[test]
     fn encoder_reaches_a_floor_that_climbs_above_it() {
@@ -338,11 +484,11 @@ mod tests {
     fn sustained_congestion_can_drop_below_half_the_cap_and_busy_keeps_latest() {
         let mut ramp = RateRamp::new(18_000_000, 250_000);
         ramp.request(2_000_000);
-        assert_eq!(ramp.target(0), Some(1_600_000));
-        assert_eq!(ramp.target(100), Some(1_600_000)); // Busy did not acknowledge.
+        assert_eq!(ramp.target(0), Some(2_000_000));
+        assert_eq!(ramp.target(100), Some(2_000_000)); // Busy did not acknowledge.
         ramp.request(1_000_000);
-        assert_eq!(ramp.target(101), Some(800_000));
-        ramp.applied(800_000, 101);
+        assert_eq!(ramp.target(101), Some(1_000_000));
+        ramp.applied(1_000_000, 101);
         assert_eq!(ramp.target(2000), None);
         ramp.request(0);
         assert_eq!(ramp.target(2001), Some(250_000));
@@ -360,9 +506,9 @@ mod tests {
             now += 1000;
         }
         assert_eq!(ramp.applied, 18_000_000);
-        // Below the saturation band the 20% headroom still applies.
+        // Below the saturation band the encoder follows the payload rate WebRTC asked for.
         ramp.request(17_000_000);
-        assert_eq!(ramp.target(now), Some(13_600_000));
+        assert_eq!(ramp.target(now), Some(17_000_000));
     }
 
     #[test]
@@ -371,10 +517,10 @@ mod tests {
         ramp.applied(2_000_000, 0);
         ramp.request(11_682_000);
         assert_eq!(ramp.target(999), None);
-        assert_eq!(ramp.target(1000), Some(9_345_600));
-        ramp.applied(9_345_600, 1000);
+        assert_eq!(ramp.target(1000), Some(11_682_000));
+        ramp.applied(11_682_000, 1000);
         ramp.request(1_696_000);
-        assert_eq!(ramp.target(1001), Some(1_356_800));
+        assert_eq!(ramp.target(1001), Some(1_696_000));
     }
 
     #[test]
@@ -467,10 +613,10 @@ mod tests {
         assert_eq!(ramp.target_paced(20_999, RatePacing::REOPEN), None);
         assert_eq!(
             ramp.target_paced(21_000, RatePacing::REOPEN),
-            Some(1_600_000)
+            Some(2_000_000)
         );
         // Recovery: 5 s wait, then one reopen if the transport budget supports the cap.
-        ramp.applied(1_600_000, 21_000);
+        ramp.applied(2_000_000, 21_000);
         ramp.request(u64::MAX);
         assert_eq!(ramp.target_paced(25_999, RatePacing::REOPEN), None);
         assert_eq!(
@@ -511,16 +657,22 @@ mod tests {
         ramp.request(2_000_000);
         assert_eq!(ramp.target_with_minimum_interval(999, 1000), None);
         ramp.request(1_000_000);
-        assert_eq!(ramp.target_with_minimum_interval(1000, 1000), Some(800_000));
-        assert_eq!(ramp.target_with_minimum_interval(1001, 1000), Some(800_000));
+        assert_eq!(
+            ramp.target_with_minimum_interval(1000, 1000),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            ramp.target_with_minimum_interval(1001, 1000),
+            Some(1_000_000)
+        );
     }
 
     #[test]
     fn collapse_probes_back_in_steps_and_restarts_when_the_estimate_falls() {
-        // 1080p60 cap 14 Mbps, floor 1 Mbps; the link proved 10 Mbps (budget 8), then collapsed.
+        // 1080p60 cap 14 Mbps, floor 1 Mbps; the link proved 10 Mbps, then collapsed.
         let mut ramp = RateRamp::new(14_000_000, 1_000_000);
         ramp.request_at(10_000_000, 1_000);
-        ramp.request_at(500_000, 3_000); // drop: ceiling latched at 4 Mbps, floor at base
+        ramp.request_at(500_000, 3_000); // drop: ceiling latched at 5 Mbps, floor at base
         assert_eq!(ramp.requested, 1_000_000);
         // Stuck estimate: +25% every 2 s up to half of the proven rate, never above it.
         let mut t = 3_000;
@@ -531,16 +683,16 @@ mod tests {
             steps.push(ramp.requested);
         }
         assert_eq!(&steps[..3], &[1_250_000, 1_562_500, 1_953_125]);
-        assert_eq!(steps.last(), Some(&4_000_000));
+        assert_eq!(steps.last(), Some(&5_000_000));
         // Within a step nothing changes, however often it is called.
         ramp.request_at(500_000, t + 1_999);
-        assert_eq!(ramp.requested, 4_000_000);
+        assert_eq!(ramp.requested, 5_000_000);
         // The estimate rising with what we send is no congestion; falling again restarts.
         ramp.request_at(5_000_000, t + 2_000);
-        assert_eq!(ramp.requested, 4_000_000);
+        assert_eq!(ramp.requested, 5_000_000);
         ramp.request_at(3_000_000, t + 2_100);
-        assert_eq!(ramp.requested, 2_400_000);
-        assert_eq!(ramp.probe_ceiling, 4_000_000);
+        assert_eq!(ramp.requested, 3_000_000);
+        assert_eq!(ramp.probe_ceiling, 5_000_000);
         // A lasting drop forgets the old peak at the next restart.
         let mut gap = RateRamp::new(14_000_000, 1_000_000);
         gap.request_at(14_000_000, 0);

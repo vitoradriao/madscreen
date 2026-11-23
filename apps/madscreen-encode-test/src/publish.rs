@@ -25,6 +25,8 @@ pub struct Live {
     cap_bps: u32,
     floor_bps: u32,
     rate_ramp: Option<madscreen_encode::rate::RateRamp>,
+    /// Corrects encoder undershoot so the output fills what WebRTC allows (ramp policy only).
+    fill: madscreen_encode::rate::FillGain,
     rate_origin: std::time::Instant,
     last_bps: u32,
     fps: FrameRate,
@@ -176,8 +178,11 @@ impl ProbeNudge {
 /// estimativa em 1,5x isso e um pico de atraso a levou a 30 kbps (0,85x do que passava). Quando o
 /// jogo voltou, o encoder gastava todo o piso de 1 Mbps e a estimativa subia ~20 kbps/s, com o
 /// `ProbeNudge` já em espera. Aqui o gatilho é o encoder saturado (dois segundos produzindo >= 60%
-/// da taxa aplicada) com o pedido abaixo da metade do teto. Sondagem que não sobe o pedido em 25%
+/// da taxa aplicada) com o pedido abaixo de 90% do teto. Sondagem que não sobe o pedido em 25%
 /// dobra o intervalo (num link limitado a estimativa já está certa); uma que sobe volta ao mínimo.
+/// GTA na Magalu (23/nov): o GCC parte de 12,6 Mbps, cai a ~4 Mbps no primeiro meio segundo e
+/// sobe ~8%/s; com o encoder preenchendo a estimativa o pedido passava da metade do teto antes
+/// da primeira sondagem e levava 13 s até o teto.
 struct StarvedProbe {
     origin: std::time::Instant,
     second: u64,
@@ -188,7 +193,7 @@ struct StarvedProbe {
     interval_s: u64,
 }
 
-const STARVED_WARMUP_S: u64 = 10;
+const STARVED_WARMUP_S: u64 = 3;
 const STARVED_MIN_INTERVAL_S: u64 = 10;
 const STARVED_MAX_INTERVAL_S: u64 = 300;
 const STARVED_REDUCED_MAX_INTERVAL_S: u64 = 12;
@@ -236,8 +241,7 @@ impl StarvedProbe {
         let saturated = produced_bps * 10 >= u64::from(applied_bps) * 6;
         let reduced_and_active = reduced_quality && produced_bps >= REDUCED_ACTIVE_BPS;
         let cap = u64::from(cap_bps);
-        let starved = request_bps > 0
-            && (request_bps < cap / 2 || (reduced_and_active && request_bps < cap * 9 / 10));
+        let starved = request_bps > 0 && request_bps < cap * 9 / 10;
         if second < STARVED_WARMUP_S || !(saturated || reduced_and_active) || !starved {
             return false;
         }
@@ -482,7 +486,7 @@ impl Live {
             rate_ramp: (options.rate_policy == crate::options::RatePolicyArg::AbsoluteRamp).then(
                 || {
                     madscreen_encode::rate::RateRamp::new(
-                        config.bitrate_bps,
+                        madscreen_encode::rate::FillGain::ceiling(config.bitrate_bps),
                         options.min_bitrate.unwrap_or(if network_quality {
                             NETWORK_QUALITY_MIN_BITRATE_BPS
                         } else {
@@ -493,6 +497,7 @@ impl Live {
             ),
             rate_origin: std::time::Instant::now(),
             last_bps: config.bitrate_bps,
+            fill: madscreen_encode::rate::FillGain::default(),
             fps: config.fps,
             native_fps: config.fps,
             frequency: qpc_frequency()?,
@@ -748,16 +753,21 @@ impl Live {
             u64::try_from(self.rate_origin.elapsed().as_millis()).unwrap_or(u64::MAX)
         });
         if let Some(ramp) = self.rate_ramp.as_mut() {
+            if accepted {
+                self.fill
+                    .observe(au.data.len(), self.last_bps, self.fps.as_f64(), rate_now_ms);
+            }
             if self.last_request_bps > 0 {
+                let request = self.fill.apply(self.last_request_bps);
                 if self
                     .governor
                     .as_ref()
                     .is_some_and(LoadGovernor::is_network_quality)
                 {
                     // O modo adaptativo cabe na banda do degrau e sonda pelo transporte.
-                    ramp.request(self.last_request_bps);
+                    ramp.request(request);
                 } else {
-                    ramp.request_at(self.last_request_bps, rate_now_ms);
+                    ramp.request_at(request, rate_now_ms);
                 }
             }
             use madscreen_encode::{backend::BackendKind, rate::RatePacing};
@@ -1188,14 +1198,14 @@ mod starved_probe_tests {
 
     #[test]
     fn estimate_near_the_cap_never_probes() {
-        assert!(run(120, |_| (8_000_000, 8_000_000, 8_000_000)).is_empty());
+        assert!(run(120, |_| (10_000_000, 13_000_000, 13_000_000)).is_empty());
     }
 
     #[test]
     fn limited_link_backs_off() {
         // Link de 5 Mbps: a sondagem não muda a estimativa, o intervalo dobra.
         let probes = run(400, |_| (5_000_000, 5_000_000, 5_000_000));
-        assert_eq!(probes, vec![10, 20, 40, 80, 160, 320]);
+        assert_eq!(probes, vec![3, 13, 33, 73, 153, 313]);
     }
 
     #[test]
@@ -1204,17 +1214,17 @@ mod starved_probe_tests {
             let request = 1_000_000 + s * 100_000;
             (request, request as u32, request)
         });
-        assert_eq!(probes, vec![10, 20, 30, 40]);
+        assert_eq!(probes, vec![3, 13, 23, 33, 43]);
     }
 
     #[test]
     fn reduced_quality_probes_periodically_even_when_active_video_underfills_the_budget() {
         let trace = |_| (850_000, 1_800_000, 2_158_000);
-        assert_eq!(run_with_quality(60, trace, true), vec![10, 20, 32, 44, 56]);
+        assert_eq!(run_with_quality(60, trace, true), vec![3, 13, 25, 37, 49]);
         assert!(run(60, trace).is_empty());
         assert_eq!(
             run_with_quality(25, |_| (850_000, 6_400_000, 8_000_000), true),
-            vec![10, 20]
+            vec![3, 13]
         );
         assert_eq!(
             run_with_quality(60, |_| (100_000, 1_800_000, 2_158_000), true),
