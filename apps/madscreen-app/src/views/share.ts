@@ -372,7 +372,7 @@ export function createShareView(): ShareView {
       ? state.audio_active == null || state.audio_active === 0 ? "Sem áudio ativo. Confira a fonte e as opções de som ao trocar janela ou tela."
         : confirmedSound ?? `Som de ${state.audio_active} ${state.audio_active === 1 ? "fonte" : "fontes"}`
       : selectedSource ? soundChoice(selectedSource) : "Escolha a fonte e o som no seletor. Sem microfone.";
-    destination.hidden = !active && !channel;
+    destination.hidden = !activeDestination;
     destination.textContent = activeDestination ? `Transmitindo: ${targetLabel(activeDestination)}` : channel ? targetLabel(channel) : "Escolha com quem compartilhar";
     chooseSource.hidden = active;
     chooseSource.classList.toggle("primary", !selectedSource);

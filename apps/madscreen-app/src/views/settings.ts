@@ -122,7 +122,7 @@ export function createSettingsView(onLogout: () => Promise<void>, updates: Updat
   }).catch(() => { /* Sem a informação, a opção fica escondida. */ });
 
   const updateStatus = el("div", { class: "alerts" });
-  const install = el("button", { class: "btn primary", type: "button", textContent: "Instalar e reiniciar", hidden: true });
+  const install = el("button", { class: "btn primary", type: "button", textContent: "Atualizar e reiniciar", hidden: true });
   const check = el("button", { class: "btn", type: "button" }, svg(icon("refresh", "sm")), "Verificar atualizações");
   check.addEventListener("click", () => { void updates.check(true); });
   install.addEventListener("click", () => { void updates.install(); });
@@ -131,7 +131,7 @@ export function createSettingsView(onLogout: () => Promise<void>, updates: Updat
     check.disabled = busy;
     install.disabled = busy;
     install.hidden = !(status.kind === "available" || (status.kind === "error" && status.stage === "install"));
-    install.textContent = status.kind === "error" ? "Tentar instalar de novo" : "Instalar e reiniciar";
+    install.textContent = status.kind === "error" ? "Tentar atualizar de novo" : "Atualizar e reiniciar";
     const message = (() => {
       switch (status.kind) {
         case "idle": return null;
@@ -167,7 +167,7 @@ export function createSettingsView(onLogout: () => Promise<void>, updates: Updat
       "div",
       { class: "card stack" },
       el("h3", {}, "Atualizações"),
-      el("p", { class: "muted small" }, "O app procura versões novas ao abrir e a cada hora, sem interromper o uso. A instalação só começa ao escolher Instalar e reiniciar."),
+      el("p", { class: "muted small" }, "O app procura versões novas ao abrir e a cada hora, sem interromper o uso. A instalação só começa ao escolher Atualizar e reiniciar."),
       el("div", { class: "row" }, check, install),
       updateStatus,
     ),

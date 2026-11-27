@@ -200,7 +200,7 @@ try {
 
   check(updateCalls.join(',')==='check'&&!settings.root.querySelector('.settings-links')&&!!settings.root.querySelector('.settings-sections'),"Navegação da Conta preserva estado do updater");
   settingsSection('Atualizações').click();
-  const installUpdate=Array.from(settings.root.querySelectorAll<HTMLButtonElement>("button")).find(b=>b.textContent==="Instalar e reiniciar")!;
+  const installUpdate=Array.from(settings.root.querySelectorAll<HTMLButtonElement>("button")).find(b=>b.textContent==="Atualizar e reiniciar")!;
   installUpdate.click();await flush();
   check(updateCalls.join(",")==="check,download"&&settings.root.textContent!.includes("Não foi possível instalar"),"Falha no download nao interrompe o engine nem instala pacote");
   failDownload=false;installUpdate.click();await flush();
@@ -230,7 +230,7 @@ try {
   });
   const disposedSettings=createSettingsView(async()=>{},disposedUpdates);
   document.body.append(disposedSettings.root);await disposedUpdates.check();await flush();
-  Array.from(disposedSettings.root.querySelectorAll<HTMLButtonElement>("button")).find(b=>b.textContent==="Instalar e reiniciar")!.click();
+  Array.from(disposedSettings.root.querySelectorAll<HTMLButtonElement>("button")).find(b=>b.textContent==="Atualizar e reiniciar")!.click();
   await flush();disposedSettings.dispose?.();disposedUpdates.dispose();finishDownload();await flush();
   check(!preparedAfterDispose,"Sair da conta durante download impede preparacao e instalacao tardias");
   disposedSettings.root.remove();

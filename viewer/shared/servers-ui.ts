@@ -345,7 +345,7 @@ export function createServers(client: MadClient, options: ServerOptions) {
     const rail = el("nav", { class: "server-rail" });
     const home = button("Amigos", "Abrir Amigos", "friends-home", () => { friendsHome = true; render(); options.onOpenDirectory?.(); });
     home.prepend(svg(icon("users")));
-    home.setAttribute("aria-pressed", String(friendsHome)); rail.append(home);
+    rail.append(home);
     rail.setAttribute("aria-label", "Escolher servidor");
     for (const item of servers) {
       const pick = button("", item.name, `server-${item.id}`, () => { friendsHome = false; serverId = item.id; channelId = ""; render(); options.onOpenDirectory?.(); });
@@ -353,7 +353,6 @@ export function createServers(client: MadClient, options: ServerOptions) {
       pick.classList.add("server-pick");
       const liveCount = item.channels.reduce((total, channel) => total + channel.live.length, 0);
       if (liveCount && (friendsHome || item.id !== serverId)) pick.append(el("span", { class: "server-live-dot", ariaLabel: `${liveCount} transmissões em outro servidor` }));
-      pick.setAttribute("aria-pressed", String(!friendsHome && item.id === serverId));
       rail.append(pick);
     }
     const addServer = actionMenu("+", "add-server");
@@ -644,6 +643,10 @@ export function createServers(client: MadClient, options: ServerOptions) {
       if (!sharing) node.prepend(svg(icon("screenShare")));
     });
     root.querySelectorAll<HTMLElement>('[data-focuskey="share-callout"]').forEach(node => { node.hidden = sharing; });
+    // Em Conta o destaque fica só no avatar: um destaque por região.
+    for (const node of serverRail.querySelectorAll<HTMLElement>('[data-focuskey="friends-home"], .server-pick')) {
+      node.setAttribute("aria-pressed", String(activePage !== "settings" && (node.dataset.focuskey === "friends-home" ? friendsHome : !friendsHome && node.dataset.focuskey === `server-${serverId}`)));
+    }
     const account = serverRail.querySelector('[data-focuskey="account-settings"]');
     account?.setAttribute("aria-current", String(activePage === "settings"));
     for (const [key, page] of [["open-watch", "watch"], ["open-share", "share"], ["account-settings", "settings"]]) {
