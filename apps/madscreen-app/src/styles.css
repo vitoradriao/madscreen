@@ -76,6 +76,8 @@ body { overflow: hidden; display: flex; flex-direction: column; }
 @media (max-width: 900px) { .watch-view .watch-grid.split { grid-template-rows: minmax(0, var(--split-a, 1fr)) var(--sp-4) minmax(0, var(--split-b, 1fr)); } }
 .watch-view .stage video { cursor: pointer; }
 .watch-compact { position: fixed; right: var(--sp-4); bottom: var(--sp-4); z-index: 20; width: min(360px, calc(100vw - 32px)); padding: var(--sp-3); display: grid; gap: var(--sp-3); background: var(--surface-1); border: 1px solid var(--border-strong); border-radius: var(--r-lg); box-shadow: var(--shadow-floating); }
+/* No canto do conteúdo: com o painel de membros aberto, não cobre a lista. Abaixo de 960 px o painel é sobreposto. */
+@media (min-width: 961px) { .shell:has(.server-members:not([hidden])) > .watch-compact { right: calc(var(--members-w) + var(--sp-4)); } }
 .watch-compact > .btn { justify-self: start; }
 .watch-compact h2 { font-size: var(--fs-md); overflow-wrap: anywhere; }
 .watch-compact .watch-panel { gap: var(--sp-2); }

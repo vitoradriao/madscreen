@@ -467,10 +467,12 @@ export function createFriends(client: MadClient, handlers: { onWatch(friend: Fri
 
   const inviteManager = createInviteManager(client);
   inviteManager.querySelector("summary")?.prepend(svg(icon("chevronDown", "sm")));
+  // Só aparece enquanto conecta ou reconecta; conectado é o estado normal e não precisa de aviso.
+  const statusRow = el("div", { class: "friends-panel-status" }, status);
   const root = el(
     "div",
     { class: "friends-panel" },
-    el("div", { class: "friends-panel-status" }, status),
+    statusRow,
     el("div", { class: "friends-actions" }, addForm,
       el("section", { class: "friends-invite" },
         el("h2", { class: "friends-label", textContent: "Convite pessoal" }),
@@ -485,7 +487,8 @@ export function createFriends(client: MadClient, handlers: { onWatch(friend: Fri
     update,
     setConnected(connected) {
       if (disposed) return;
-      status.textContent = connected ? "Tempo real ativo" : "Reconectando…";
+      status.textContent = connected ? "" : "Reconectando…";
+      statusRow.hidden = connected;
       if (connected && current) update(current);
     },
     dispose() {

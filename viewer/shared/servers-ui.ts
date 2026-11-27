@@ -352,8 +352,8 @@ export function createServers(client: MadClient, options: ServerOptions) {
       pick.append(initials(item.name));
       pick.classList.add("server-pick");
       const liveCount = item.channels.reduce((total, channel) => total + channel.live.length, 0);
-      if (liveCount && item.id !== serverId) pick.append(el("span", { class: "server-live-dot", ariaLabel: `${liveCount} transmissões em outro servidor` }));
-      pick.setAttribute("aria-pressed", String(item.id === serverId));
+      if (liveCount && (friendsHome || item.id !== serverId)) pick.append(el("span", { class: "server-live-dot", ariaLabel: `${liveCount} transmissões em outro servidor` }));
+      pick.setAttribute("aria-pressed", String(!friendsHome && item.id === serverId));
       rail.append(pick);
     }
     const addServer = actionMenu("+", "add-server");
@@ -502,16 +502,21 @@ export function createServers(client: MadClient, options: ServerOptions) {
         if (person.role !== "member") name.append(el("span", { class: "role" }, person.role === "owner" ? "Dono" : "Admin"));
         const row = el("div", { class: `member member-row${person.online ? "" : " offline"}` }, portrait,
           el("div", { class: "text member-identity" }, name, el("span", { class: "activity", textContent: live ? `Ao vivo · ${live.live?.title || "Tela compartilhada"}` : person.online ? "Online" : "Offline" })));
-        if (server.role === "owner" && person.role !== "owner") {
-          const permissions = actionMenu("⋯", `member-${person.id}`);
-          permissions.menu.querySelector("summary")!.setAttribute("aria-label", `Opções de ${person.displayName}`);
+        const canKick = person.id !== snapshot?.me?.id && person.role !== "owner" && (server.role === "owner" || server.role === "admin" && person.role === "member");
+        // Remover fica no ⋯: um botão fixo na linha cortava o nome no painel de 248 px.
+        const permissions = server.role === "owner" && person.role !== "owner" || canKick ? actionMenu("⋯", `member-${person.id}`) : null;
+        permissions?.menu.querySelector("summary")!.setAttribute("aria-label", `Opções de ${person.displayName}`);
+        if (permissions && server.role === "owner" && person.role !== "owner") {
           permissions.items.append(menuButton(person.role === "admin" ? "Remover admin" : "Tornar admin", `Alterar permissão de ${person.displayName}`, `role-${person.id}`, () => { void run(() => client.setMemberRole(server.id, person.id, person.role === "admin" ? "member" : "admin")); }, "key"));
           permissions.items.append(menuButton("Transferir propriedade", `Transferir propriedade para ${person.displayName}`, `transfer-${person.id}`, () => { void ask("Transferir propriedade?", undefined, `${person.displayName} será o novo dono. Você ficará como administrador.`).then(ok => { if (ok) void run(() => client.transferServer(server.id, person.id)); }); }));
-          row.append(permissions.menu);
         }
-        if (person.id !== snapshot?.me?.id && person.role !== "owner" && (server.role === "owner" || server.role === "admin" && person.role === "member")) {
-          row.append(button("Remover", `Remover ${person.displayName} do servidor`, `kick-${person.id}`, () => { void ask("Remover membro?", undefined, `${person.displayName} perderá acesso aos canais e às transmissões deste servidor.`).then(ok => { if (ok) void run(() => client.removeMember(server.id, person.id)); }); }));
+        if (permissions && canKick) {
+          if (permissions.items.childElementCount) permissions.items.append(el("hr", { class: "menu-sep" }));
+          const kick = menuButton("Remover do servidor", `Remover ${person.displayName} do servidor`, `kick-${person.id}`, () => { void ask("Remover membro?", undefined, `${person.displayName} perderá acesso aos canais e às transmissões deste servidor.`).then(ok => { if (ok) void run(() => client.removeMember(server.id, person.id)); }); });
+          kick.classList.add("destructive");
+          permissions.items.append(kick);
         }
+        if (permissions) row.append(permissions.menu);
         roster.append(row);
       }
       members.append(roster);

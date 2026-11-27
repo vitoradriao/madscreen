@@ -6,6 +6,10 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root=fileURLToPath(new URL('../../',import.meta.url));
+// Opcional: MADSCREEN_PAPER_FILE=<id> recria cada tela como camadas editáveis no Paper Desktop aberto.
+const paperFile=process.env.MADSCREEN_PAPER_FILE,paperPage=process.env.MADSCREEN_PAPER_PAGE;
+const paper=paperFile?await import('./paper-mcp.mjs'):null;if(paper)await paper.connect();
+const serializer=paper?await readFile(path.join(root,'tools/ui/paper-serialize.js'),'utf8'):'';
 const out=path.resolve(root,process.env.MADSCREEN_UI_OUTPUT || 'bench-results/redesign-2026-11-03');await mkdir(path.join(out,'prints'),{recursive:true});
 const bundle=await build({entryPoints:[path.join(root,'tools/ui/redesign-fixture.ts')],bundle:true,write:false,format:'esm',platform:'browser',target:'es2022',loader:{'.css':'empty'},alias:{'livekit-client':path.join(root,'viewer/tests/fake-sdk.mjs'),'@shared':path.join(root,'viewer/shared')},define:{'import.meta.env.VITE_MADSCREEN_URL':JSON.stringify('http://127.0.0.1')}});
 let css=await readCss(path.join(root,'viewer/shared/tokens.css'));
@@ -19,7 +23,7 @@ try{
   const tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();socket=new WebSocket(tabs.find(t=>t.type==='page').webSocketDebuggerUrl);await new Promise((r,j)=>{socket.onopen=r;socket.onerror=j;});
   let sequence=0;const pending=new Map(),errors=[];socket.onmessage=event=>{const v=JSON.parse(event.data);if(v.method==='Runtime.exceptionThrown')errors.push(v.params.exceptionDetails);if(v.id){const p=pending.get(v.id);pending.delete(v.id);v.error?p.reject(v.error):p.resolve(v.result);}};
   const send=(method,params={},sessionId)=>new Promise((resolve,reject)=>{const id=++sequence;pending.set(id,{resolve,reject});socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));});
-  const evaluate=async expression=>{const r=await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error(r.exceptionDetails.exception?.description||r.exceptionDetails.text);return r.result.value;};
+  const evaluate=async(expression,sessionId)=>{const r=await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true},sessionId);if(r.exceptionDetails)throw Error(r.exceptionDetails.exception?.description||r.exceptionDetails.text);return r.result.value;};
   await send('Runtime.enable');await send('Network.enable');await send('Network.setBlockedURLs',{urls:['https://*','wss://*']});await send('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false});
   await send('Emulation.setFocusEmulationEnabled',{enabled:true});
   await send('Browser.setPermission',{permission:{name:'fullscreen',allowWithoutGesture:true},setting:'granted',origin:`http://127.0.0.1:${server.address().port}`});
@@ -30,11 +34,21 @@ try{
   const click=selector=>act(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw Error('Elemento ausente: '+${JSON.stringify(selector)});el.click();})()`);
   const textClick=text=>act(`(()=>{const el=[...document.querySelectorAll('button,summary')].find(el=>el.getClientRects().length&&el.textContent.trim()===${JSON.stringify(text)});if(!el)throw Error('Botão ausente: '+${JSON.stringify(text)});el.click();})()`);
   const items=[];
-  const capture=async(id,title,route,note='',sessionId)=>{await evaluate('document.fonts.ready');await pause();const img=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false},sessionId);const file=`prints/${String(items.length+1).padStart(2,'0')}-${id}.png`;await writeFile(path.join(out,file),Buffer.from(img.data,'base64'));const texts=sessionId?'Mini-player em janela separada':await evaluate('document.body.innerText');items.push({id,title,route,note,file,texts});process.stdout.write(`${file}: ${title}\n`);};
-  const reset=()=>act('demo.shell()');
+  const capture=async(id,title,route,note='',sessionId)=>{await evaluate('document.fonts.ready');await pause();const img=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false},sessionId);const file=`prints/${String(items.length+1).padStart(2,'0')}-${id}.png`;await writeFile(path.join(out,file),Buffer.from(img.data,'base64'));const texts=sessionId?'Mini-player em janela separada':await evaluate('document.body.innerText');items.push({id,title,route,note,file,texts});process.stdout.write(`${file}: ${title}\n`);if(paper)await toPaper(`${String(items.length).padStart(2,'0')} · ${title}`,sessionId);};
+  const toPaper=async(name,sessionId)=>{
+    if(sessionId)await send('Runtime.enable',{},sessionId);
+    await evaluate(serializer,sessionId);const shot=await evaluate('window.__paperSerialize()',sessionId);
+    const art=await paper.tool('create_artboard',{fileId:paperFile,...(paperPage?{pageId:paperPage}:{}),name,styles:{width:shot.width+'px',height:shot.height+'px',backgroundColor:shot.bg}});
+    const i=items.length-1;await paper.tool('update_styles',{fileId:paperFile,updates:[{nodeIds:[art.id],styles:{left:(i%4)*1440+'px',top:Math.floor(i/4)*1140+'px'}}]});
+    await paper.tool('write_html',{fileId:paperFile,targetNodeId:art.id,mode:'insert-children',html:shot.html});
+    await paper.tool('finish_working_on_nodes',{fileId:paperFile,nodeIds:[art.id]});
+  };
+  // O app abre em Amigos; as telas de canal partem do servidor de demonstração.
+  const reset=async()=>{await act('demo.shell()');await click('[data-focuskey="server-demo"]');};
   await act('demo.login()');await capture('login','Entrada','Abrir o app sem sessão.');
   await click('.auth-card details summary');await capture('login-alternativo','Entrada alternativa','Entrada → expandir a seção de acesso alternativo.');
   await act('demo.recovery()');await capture('chave-recuperacao','Chave de recuperação','Criar conta pelo acesso alternativo → concluir cadastro.','Chave fictícia. Estado posterior ao cadastro; não foi criada uma conta.');
+  await act('demo.shell()');await capture('amigos','Amigos','Abrir o app com sessão.','Pedidos, lives e amigos fictícios.');
   await reset();await capture('diretorio','Canal com duas lives','Entrar → selecionar servidor Amigos → canal Geral.');
   await click('[data-focuskey="toggle-members"]');await capture('membros-ocultos','Canal com membros recolhidos','Canal → ícone de membros no cabeçalho.');
   await reset();await click('[data-focuskey="channel-games"]');await capture('canal-vazio','Canal sem lives','Servidor Amigos → canal Jogos.');
@@ -44,14 +58,14 @@ try{
   await reset();await click('.server-add-menu > summary');await capture('entrar-convite','Entrar com convite','+ → Entrar com convite → informar código ou link → Entrar.');
   await reset();await click('[data-focuskey="invite"]');await capture('convite','Convidar amigos','Canal → Convidar (ou Convidar amigos).','Link fictício sem validade.');
   await reset();await click('.server-title-menu > summary');await capture('menu-servidor','Menu do servidor','Nome do servidor → seta.','Ações variam conforme o papel de dono/admin/membro.');
-  for(const [key,id,title] of [['server-rename','renomear-servidor','Renomear servidor'],['server-leave','sair-servidor','Sair do servidor'],['server-remove','apagar-servidor','Apagar servidor']]){await reset();await click('.server-title-menu > summary');await click(`[data-focuskey="${key}"]`);await capture(id,title,`Nome do servidor → ${title}.`,'Somente diálogo aberto; operação não confirmada.');}
+  for(const [key,id,title] of [['server-rename','renomear-servidor','Renomear servidor'],['server-remove','apagar-servidor','Apagar servidor']]){await reset();await click('.server-title-menu > summary');await click(`[data-focuskey="${key}"]`);await capture(id,title,`Nome do servidor → ${title}.`,'Somente diálogo aberto; operação não confirmada.');}
   await reset();await click('[data-action-menu="channel-general"] > summary');await capture('menu-canal','Menu do canal','Barra de canais → Opções do canal.');
   for(const [key,id,title] of [['channel-create','criar-canal','Criar canal'],['channel-rename','renomear-canal','Renomear canal'],['channel-remove','apagar-canal','Apagar canal']]){await reset();await click('[data-action-menu="channel-general"] > summary');await click(`[data-focuskey="${key}"]`);await capture(id,title,`Opções do canal → ${title==='Criar canal'?'Novo canal':title==='Renomear canal'?'Renomear':title}.`,'Somente diálogo aberto.');}
   await reset();await click('[data-action-menu="member-bruno"] > summary');await capture('menu-membro','Permissão de membro','Dono do servidor → painel Membros → ⋯ ao lado de Bruno.');
   await reset();await act('demo.disconnect()');await capture('reconectando','Diretório desconectado','Perda da conexão de presença/sinalização.','Estado induzido localmente, sem derrubar serviço.');
   await reset();await act('demo.error()');await capture('erro-diretorio','Erro no diretório','Falha ao consultar servidores.','Erro fictício aplicado pelo componente real.');
   await reset();await act("demo.page('share')");await capture('compartilhar','Compartilhar: nenhuma fonte','Barra de canais → Minha transmissão.');
-  await textClick('Escolher janela ou tela');await capture('seletor-janelas','Selecionar janela e som','Minha transmissão → Escolher janela ou tela.','Janelas e sugestão fictícias; sem captura de outros aplicativos.');
+  await act("(()=>{const s=document.querySelector('.share-view select');s.value='general';s.dispatchEvent(new Event('change'));})()");await textClick('Escolher janela ou tela');await capture('seletor-janelas','Selecionar janela e som','Minha transmissão → Escolher janela ou tela.','Janelas e sugestão fictícias; sem captura de outros aplicativos.');
   await textClick('Telas');await capture('seletor-telas','Selecionar tela e aplicativos com som','Seletor de fonte → Telas.');
   await click('.pk-card');await capture('revisar-compartilhamento','Revisar fonte, som, qualidade e FPS','Seletor → escolher uma tela → revisar antes de Compartilhar.');
   await act('demo.shareState({})');await capture('live-ativa','Minha transmissão ao vivo','Revisão → Compartilhar; também acessível por Minha transmissão.','Estado IPC fictício; nenhuma live publicada.');

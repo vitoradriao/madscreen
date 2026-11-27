@@ -18,7 +18,10 @@ initializeTheme();
 
 const user=(id:string,name:string,role='member')=>({id,username:id,displayName:name,avatar:null,online:true,role,live:{since:Date.now()-300000,title:'Janela de demonstração',viewers:2,generation:1}});
 const ana=user('ana','Ana','owner'), bruno=user('bruno','Bruno'), carol={...user('carol','Carol'),online:false,live:null};
-const snapshot:any={servers:[{id:'demo',name:'Amigos',role:'owner',members:[ana,bruno,carol],channels:[{id:'general',name:'Geral',live:[bruno,user('dani','Dani')]},{id:'games',name:'Jogos',live:[]}]}]};
+const dani=user('dani','Dani'), edu={...user('edu','Edu'),live:null};
+const profile=({id,username,displayName,avatar}:any)=>({id,username,displayName,avatar});
+// Início (Amigos) e servidor de demonstração; o shell abre em Amigos como o app.
+const snapshot:any={me:profile(ana),friends:[bruno,dani,edu,carol],incoming:[profile(user('fabi','Fabi'))],outgoing:[profile(user('gui','Gui'))],directSessions:[],servers:[{id:'demo',name:'Amigos',ownerId:'ana',role:'owner',members:[ana,bruno,carol],channels:[{id:'general',name:'Geral',live:[bruno,dani]},{id:'games',name:'Jogos',live:[]}]}]};
 client.setSession({token:'fictional-local-only',exp:9999999999,user:ana} as any);
 client.providers=async()=>({discord:true,google:false,firstUser:false});
 client.previewInvite=async()=>({inviter:{displayName:'Ana'},server:{name:'Amigos'},channel:{name:'Geral'}} as any);
