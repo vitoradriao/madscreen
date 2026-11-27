@@ -17,7 +17,8 @@ let css=await readCss(path.join(root,'viewer/shared/tokens.css'));
 css+='\n'+await readFile(path.join(root,'apps/madscreen-app/src/styles.css'),'utf8')+'\n'+await readFile(path.join(root,'apps/madscreen-app/src/views/picker.css'),'utf8')+'\n'+await readFile(path.join(root,'viewer/shared/redesign.css'),'utf8');
 const server=createServer((req,res)=>{res.setHeader('Content-Type',req.url==='/demo.js'?'text/javascript':'text/html; charset=utf-8');res.end(req.url==='/demo.js'?bundle.outputFiles[0].text:`<!doctype html><html lang="pt-BR"><meta charset="utf-8"><style>${css}</style><body><script type="module" src="/demo.js"></script></body></html>`);});await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const profile=path.join(out,'chrome-profile-'+Date.now());await mkdir(profile,{recursive:true});
-const child=spawn('C:/Program Files/Google/Chrome/Application/chrome.exe',['--headless=new','--no-first-run','--disable-background-networking','--disable-popup-blocking','--autoplay-policy=no-user-gesture-required','--window-size=1280,800','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{stdio:'ignore',windowsHide:true});
+// MADSCREEN_BROWSER aceita o msedge.exe: mesmo motor do WebView2 do app quando as versões coincidem.
+const child=spawn(process.env.MADSCREEN_BROWSER||'C:/Program Files/Google/Chrome/Application/chrome.exe',['--headless=new','--no-first-run','--disable-background-networking','--disable-popup-blocking','--autoplay-policy=no-user-gesture-required','--window-size=1280,800','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{stdio:'ignore',windowsHide:true});
 let socket;
 try{
   let port;for(let i=0;i<100;i++){try{port=(await readFile(path.join(profile,'DevToolsActivePort'),'utf8')).split('\n')[0];break;}catch{await new Promise(r=>setTimeout(r,100));}}if(!port)throw Error('Chrome não iniciou');
