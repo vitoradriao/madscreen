@@ -12,6 +12,15 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+// Fundos com texto branco legível (contraste ≥ 4,5:1) e longe do vermelho, que é só de "ao vivo".
+const TINTS = ["#6B4EE6", "#0F7F6E", "#A8620E", "#2F6FD6", "#B83C86", "#3F7D2A", "#55657A", "#0E7490"];
+/** Cor estável por pessoa ou servidor: o mesmo id sempre recebe a mesma cor. */
+export function tint(id: string): string {
+  let hash = 0;
+  for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return TINTS[hash % TINTS.length]!;
+}
+
 /** SVG estático de `icons.ts` (nunca de dados externos). */
 export function svg(markup: string): HTMLElement {
   const holder = document.createElement("span");

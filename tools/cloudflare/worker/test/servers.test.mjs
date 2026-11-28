@@ -412,7 +412,12 @@ test("matriz dono/admin/membro, transferência explícita e revogação de convi
     await assert.rejects(hub.changeDirectory(admin,"role",d.serverId,"member",otherAdmin),failure("sem_permissao"));
     await assert.rejects(hub.changeDirectory(admin,"kick",d.serverId,undefined,otherAdmin),failure("sem_permissao"));
     await assert.rejects(hub.changeDirectory(member,"channel_create",d.serverId,"Canal"),failure("sem_permissao"));
-    await assert.rejects(hub.createInvite(member,d.serverId),failure("sem_permissao"));
+    const memberInvite=await hub.createInvite(member,d.serverId);
+    assert.equal(memberInvite.destination.serverId,d.serverId);
+    await assert.rejects(hub.listInvites(member,d.serverId),failure("sem_permissao"));
+    await assert.rejects(hub.revokeInvite(member,invite.code),failure("sem_permissao"));
+    await hub.revokeInvite(member,memberInvite.code);
+    await assert.rejects(hub.createInvite(await oauth(hub,"de_fora"),d.serverId),failure("sem_acesso_servidor"));
     await hub.changeDirectory(admin,"channel_create",d.serverId,"Canal");
     await hub.changeDirectory(admin,"kick",d.serverId,undefined,member);
     assert.equal((await hub.friends(member)).servers.length,0);

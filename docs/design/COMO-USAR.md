@@ -2,7 +2,9 @@
 
 Cópia do design system publicado em claude.ai (privado), para quem vai aplicar o
 redesign no código. Direção aprovada em 03/11/2026: **vídeo em primeiro plano**,
-só preto, branco e cinza, membros em lista vertical à direita.
+só preto, branco e cinza, membros em lista vertical à direita. Atualizada em
+27/11/2026: navegação lateral, vermelho só para ao vivo e cor de identidade por
+servidor e pessoa (detalhes em `README.md`).
 
 Estado em 03/11/2026: **aplicado no código do app**, incluindo Aparência em Conta.
 Build, regressões de navegador e inspeção visual com dados fictícios executados.
@@ -43,8 +45,8 @@ A fonte é a Inter que já está em `apps/madscreen-app/public/fonts/inter.woff2
 
 ## Regras para aplicar
 
-- Não remova nem invente funcionalidade: toda ação de hoje continua existindo, mesmo que mude de lugar (ex.: canais viram abas no cabeçalho; "Telas iguais" vira "Lado a lado").
-- Uma cor de destaque por região (`accent`). Estado é palavra, ícone, peso e borda, nunca cor.
+- Não remova nem invente funcionalidade: toda ação de hoje continua existindo, mesmo que mude de lugar (ex.: canais e lives ficam na barra lateral; "Telas iguais" vira "Lado a lado").
+- Uma cor de destaque por região (`accent`). Vermelho (`live`) só para ao vivo; cor de identidade (`tint`) só para servidores, avatares e capas. Fora isso, estado é palavra, ícone, peso e borda.
 - Tudo que fica sobre vídeo (`.stage`, `.tile`) leva `data-theme="dark"` no tema Papel.
 - Valores vêm de `tokens.json`/`tokens.css`; não escreva cores ou tamanhos soltos.
 - Aplique por etapas (estrutura, canal, assistir, compartilhar, diálogos, conta, estados, entrada) e compare cada uma com o PNG.

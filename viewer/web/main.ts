@@ -16,6 +16,10 @@ let renderVersion = 0;
 let loginAbort: AbortController | null = null;
 let startupInviteError = "";
 
+function storedWatch(): string | null { try { return sessionStorage.getItem("ms.watch"); } catch { return null; } }
+function rememberWatch(username: string | null): void {
+  try { if (username) sessionStorage.setItem("ms.watch", username); else sessionStorage.removeItem("ms.watch"); } catch { /* Sem armazenamento: vale só nesta página. */ }
+}
 function topbar(right?: HTMLElement): HTMLElement {
   return el("header", { class: "topbar" }, el("div", { class: "brand" }, svg(icon("logo")), "madscreen"), right ?? null);
 }
@@ -54,17 +58,19 @@ async function showWorkspace(): Promise<void> {
   let disposed = false;
   let receivedSnapshot = false;
   let opened = false;
-  let wanted = params.get("u");
+  // A live pedida sobrevive ao login pelo Discord, que sai e volta para a página.
+  let wanted = params.get("u") ?? storedWatch();
+  if (wanted) rememberWatch(wanted);
   const watchPanel = createWatchLayout(client, { onLeave: () => showDirectory(), onAdd: () => chooseAnother() });
   const resume = el("button", { class: "btn sm", type: "button", textContent: "Voltar às transmissões" });
   resume.addEventListener("click", () => main.replaceChildren(watching));
   const back = el("button", { class: "btn sm", type: "button", textContent: "Parar de assistir e voltar aos servidores" });
   const watching = el("div", { class: "stack" }, back, watchPanel.root);
   const servers = createServers(client, { watchLabel: username => watchPanel.actionLabel(username), onWatch: stream => open(stream), onSnapshot: next => { receivedSnapshot = true; update(next); } });
-  function showDirectory(): void { watchPanel.stop(); servers.show(); opened = false; wanted = null; history.replaceState(null, "", "/watch"); main.replaceChildren(alerts, servers.root); }
+  function showDirectory(): void { watchPanel.stop(); servers.show(); opened = false; wanted = null; rememberWatch(null); history.replaceState(null, "", "/watch"); main.replaceChildren(alerts, servers.root); }
   function chooseAnother(): void { wanted = null; servers.show(); main.replaceChildren(alerts, resume, servers.root); }
   function open(stream: Pick<FriendView, "username" | "displayName">): void {
-    opened = true; wanted = null; main.replaceChildren(watching); watchPanel.watch(stream);
+    opened = true; wanted = null; rememberWatch(null); main.replaceChildren(watching); watchPanel.watch(stream);
     history.replaceState(null, "", `/watch?u=${encodeURIComponent(stream.username)}`);
   }
   back.addEventListener("click", showDirectory);
@@ -94,9 +100,9 @@ async function showWorkspace(): Promise<void> {
       const next = await client.completeInvite(confirmInvite);
       if (disposed || !next) return;
       receivedSnapshot = true;
-      wanted = null;
+      // Convite para assistir (`?u=`): a live abre assim que aparecer no servidor recém-acessado.
       update(next); if (next.destination) servers.select(next.destination);
-      history.replaceState(null, "", "/watch");
+      if (!opened) history.replaceState(null, "", wanted ? `/watch?u=${encodeURIComponent(wanted)}` : "/watch");
       alerts.replaceChildren(banner("ok", next.inviteStatus === "already_redeemed" ? "Este convite já foi usado por você. Nenhuma relação foi recriada; peça outro link se necessário." : next.destination ? `Você entrou em ${next.destination.serverName}.` : "Convite pessoal aceito. Abra Amigos para compartilhar."));
     } catch (error) {
       if (disposed) return;
@@ -110,7 +116,7 @@ async function showWorkspace(): Promise<void> {
   void joinPending();
 }
 
-if (inviteMatch?.[1]) mount(topbar(), createInviteLanding(client, inviteMatch[1]));
+if (inviteMatch?.[1]) mount(topbar(), createInviteLanding(client, inviteMatch[1], params.get("u")));
 else {
   const invite = params.get("invite");
   if (invite) { try { rememberInvite(invite, client.base); } catch (error) { clearInvite(); startupInviteError = error instanceof Error ? error.message : "Convite inválido."; } }

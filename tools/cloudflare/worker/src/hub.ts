@@ -630,8 +630,8 @@ export class HubDO extends DurableObject<Env> {
     const code = cleanCode(input);
     const row = this.sql.exec<{ user_id: string; server_id: string | null; kind: string }>("SELECT user_id,server_id,kind FROM invites WHERE code = ?", code).toArray()[0];
     if (!row) throw new ApiError(404, "convite_invalido", "Convite não encontrado.");
-    if (row.kind === "server" && row.server_id) this.directory.assertManage(uid, row.server_id);
-    else if (row.user_id !== uid) throw new ApiError(403, "sem_permissao", "Este convite pertence a outra pessoa.");
+    if (row.kind === "server" && row.server_id && row.user_id !== uid) this.directory.assertManage(uid, row.server_id);
+    else if (row.kind !== "server" && row.user_id !== uid) throw new ApiError(403, "sem_permissao", "Este convite pertence a outra pessoa.");
     this.sql.exec("UPDATE invites SET revoked = 1 WHERE code = ?", code);
   }
 

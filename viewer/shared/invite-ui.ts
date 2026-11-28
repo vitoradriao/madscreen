@@ -1,7 +1,8 @@
 import { inviteCodeFrom, rememberInvite, type InvitePreview, type MadClient } from "./client";
 import { banner, copyText, el } from "./dom";
 
-export function createInviteLanding(client: MadClient, input: string): HTMLElement {
+/** Página do link de convite. Com `live` (nome de usuário), o convite é para assistir: o navegador vem primeiro. */
+export function createInviteLanding(client: MadClient, input: string, live?: string | null): HTMLElement {
   const root = el("main", { class: "invite-landing card stack" });
   let code: string;
   try { code = inviteCodeFrom(input, client.base); }
@@ -11,7 +12,7 @@ export function createInviteLanding(client: MadClient, input: string): HTMLEleme
     const download = el("a", { class: "btn", textContent: "Baixar o madscreen para Windows" });
     const hint = el("p", { class: "small muted", textContent: "Para transmitir a sua tela, instale o app. Depois de instalar, abra este link novamente para confirmar o convite." });
     const openApp = el("a", { class: "btn", href: `madscreen://invite/${code}`, textContent: "Já tenho o app: abrir convite" });
-    const web = el("a", { class: "btn ghost", href: `/watch?invite=${encodeURIComponent(code)}`, textContent: "Assistir pelo navegador, sem instalar" });
+    const web = el("a", { class: "btn ghost", href: `/watch?invite=${encodeURIComponent(code)}${live ? `&u=${encodeURIComponent(live)}` : ""}`, textContent: "Assistir pelo navegador, sem instalar" });
     web.addEventListener("click", () => { rememberInvite(code, client.base); });
     const copy = el("button", { class: "btn sm", type: "button", textContent: "Copiar código" });
     const codeBox = el("input", { class: "input mono", value: code, readOnly: true });
@@ -22,9 +23,18 @@ export function createInviteLanding(client: MadClient, input: string): HTMLEleme
       el("h1", { textContent: destination ? `Entrar em ${preview.server!.name}` : `Adicionar ${preview.inviter.displayName} e entrar no madscreen` }),
       el("p", { class: "muted", textContent: `${destination ? `Destino: ${destination}. Este convite concede apenas participação no servidor.` : "Convite pessoal: cria somente a amizade, sem entrar em servidores."} Válido até ${new Date(preview.expiresAt * 1000).toLocaleDateString("pt-BR")}; ${preview.maxUses - preview.uses} uso(s) disponível(is).` }),
       download, openApp, web, hint, el("div", { class: "row" }, codeBox, copy));
+    if (live && preview.server) {
+      // Convite para assistir: quem recebe quer ver agora; instalar fica como alternativa.
+      root.querySelector("h1")!.textContent = `Assistir à live de ${preview.inviter.displayName}`;
+      root.querySelector("p")!.textContent = `Abra no navegador, entre com Discord ou com um nome e assista agora, sem instalar nada. Ao entrar, você passa a fazer parte de ${preview.server.name}. Válido até ${new Date(preview.expiresAt * 1000).toLocaleDateString("pt-BR")}.`;
+      web.className = "btn primary";
+      web.textContent = "Assistir pelo navegador";
+      root.insertBefore(web, download);
+      hint.textContent = "Quer transmitir também? Instale o app e abra este link de novo.";
+    }
     try {
       const info = await client.request<{ downloadAvailable: boolean }>("GET", "/app/info", undefined, false);
-      if (info.downloadAvailable) { download.href = "/download/windows"; download.classList.add("primary"); }
+      if (info.downloadAvailable) { download.href = "/download/windows"; if (!live) download.classList.add("primary"); }
       else {
         download.setAttribute("aria-disabled", "true");
         web.className = "btn primary";

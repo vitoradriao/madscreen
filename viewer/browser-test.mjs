@@ -252,8 +252,9 @@ try {
       const actionsVisible=await evaluate(`(() => ['account-settings','invite','toggle-members','share-here'].every(key=>{const button=document.querySelector('[data-focuskey="'+key+'"]');const r=button?.getBoundingClientRect();return r&&r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth;}))()`);
       if(!actionsVisible)throw Error('Ação essencial oculta ou cortada em '+width);
       if(width>=1280) {
-        const positions=await evaluate(`(() => {const box=s=>document.querySelector(s).getBoundingClientRect();const rail=box('.directory-rail'),header=box('.server-navigation'),share=box('[data-focuskey="share-here"]'),members=box('.server-members'),channels=box('.server-navigation > nav');return {width:innerWidth,railLeft:rail.left,railRight:rail.right,headerLeft:header.left,headerTop:header.top,headerHeight:header.height,channelsTop:channels.top,shareRightGap:header.right-share.right,shareInHeader:share.top>=header.top&&share.bottom<=header.bottom,membersLeft:members.left,membersRight:members.right};})()`);
-        if(positions.railLeft!==0||positions.railRight!==64||Math.abs(positions.railRight-positions.headerLeft)>1||positions.headerTop!==0||positions.headerHeight!==64||!positions.shareInHeader||positions.shareRightGap>33||Math.abs(positions.membersRight-width)>1)throw Error('Composição diverge da referência: '+JSON.stringify(positions));
+        // Grade aprovada em 27/11/2026: servidores | barra lateral (canais, Sua transmissão, conta) | cabeçalho do canal + conteúdo | membros.
+        const positions=await evaluate(`(() => {const box=s=>document.querySelector(s).getBoundingClientRect();const rail=box('.directory-rail'),side=box('.server-navigation'),top=box('.channel-topbar'),share=box('[data-focuskey="share-here"]'),members=box('.server-members'),channels=box('.side-channels');return {width:innerWidth,railLeft:rail.left,railRight:rail.right,sideLeft:side.left,sideRight:side.right,sideTop:side.top,topLeft:top.left,topTop:top.top,topHeight:top.height,channelsTop:channels.top,shareInSide:share.left>=side.left&&share.right<=side.right&&share.top>=channels.bottom,membersLeft:members.left,membersRight:members.right};})()`);
+        if(positions.railLeft!==0||positions.railRight!==64||Math.abs(positions.railRight-positions.sideLeft)>1||positions.sideTop!==0||Math.abs(positions.sideRight-positions.topLeft)>1||positions.topTop!==0||positions.topHeight!==56||!positions.shareInSide||Math.abs(positions.membersRight-width)>1)throw Error('Composição diverge da referência: '+JSON.stringify(positions));
         await verifyRenderedFonts("servers");
         const counterAligned=await evaluate(`(() => {const badge=document.querySelector('.channel-live-count');if(!badge)return false;const box=badge.getBoundingClientRect();return box.width>=20&&box.height>=20&&badge.textContent==='2';})()`);
         if(!counterAligned)throw Error('Contador de lives ilegível em '+width);
@@ -267,7 +268,7 @@ try {
     await evaluate(`document.body.innerHTML='<div class="shell directory-mode"><main class="content directory-mode">'+window.emptyDirectoryUiHtml+'</main></div>'`);
     const emptyPicture=await send('Page.captureScreenshot',{format:'png'});
     await writeFile(path.join(output,'directory-empty-1348.png'),Buffer.from(emptyPicture.data,'base64'));
-    result.checks.push('Rail/canais/cabeçalho/membros e CTA no canto superior direito conferidos por posição');
+    result.checks.push('Servidores, barra lateral com Sua transmissão, cabeçalho do canal e membros conferidos por posição');
     for(const scale of [1,1.25,1.5,2]) {
       await send('Emulation.setDeviceMetricsOverride',{width:Math.round(1020/scale),height:Math.round(800/scale),deviceScaleFactor:scale,mobile:false});
       await evaluate(`(() => {document.body.innerHTML='<div class="shell"><aside class="sidebar">'+window.shellSidebarHtml+'</aside><main class="content">'+window.shareReviewHtml+'</main></div>';document.querySelector('.share-quality').open=true;})()`);

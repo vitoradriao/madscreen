@@ -44,6 +44,8 @@ export interface ShareView extends View {
   updateDirectory(snapshot: Snapshot): void;
   startInChannel(target: InviteDestination): void;
   startWithFriend(friend: FriendView): void;
+  /** Pausa/retoma o vídeo (`true`) ou silencia/reativa o som (`false`), com as mesmas travas dos botões da página. */
+  togglePrivacy(video: boolean): void;
 }
 
 export function createShareView(): ShareView {
@@ -807,6 +809,7 @@ export function createShareView(): ShareView {
       try { localStorage.setItem(channelKey, preferredChannel); } catch { /* Sem armazenamento. */ }
       void prepareSource(true);
     },
+    togglePrivacy(video) { void requestPrivacy(video); },
     hide: closePreview,
     dispose() {
       disposed = true;

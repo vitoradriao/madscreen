@@ -1,6 +1,6 @@
 // Componentes de interface compartilhados (app Tauri e viewer web): entrar, amigos e assistir.
 import { ApiFailure, clearPkce, savedPkce, pendingInvite, rememberInvite, WatchSession, type FriendView, type MadClient, type Snapshot, type UserView, type WatchState, type WatchStats, type VideoQuality } from "./client";
-import { ago, banner, copyText, el, initials, segmented, svg } from "./dom";
+import { ago, banner, copyText, el, initials, segmented, svg, tint } from "./dom";
 import { icon } from "./icons";
 import { diagnosticGuidance } from "./diagnostic-guidance";
 import { videoTheme } from "./theme";
@@ -10,6 +10,7 @@ const errorText = (error: unknown): string => (error instanceof Error ? error.me
 
 export function avatar(user: UserView, online?: boolean): HTMLElement {
   const root = el("div", { class: "avatar" });
+  root.style.setProperty("--tint", tint(user.id));
   if (user.avatar) {
     const image = el("img", { src: user.avatar, alt: "", referrerPolicy: "no-referrer", loading: "lazy", draggable: false });
     image.addEventListener("error", () => image.replaceWith(initials(user.displayName)), { once: true });

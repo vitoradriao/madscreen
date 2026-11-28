@@ -117,7 +117,8 @@ export class ServerDirectory {
 
   inviteTarget(uid: string, serverId?: string, channelId?: string): InviteDestination {
     if (!serverId) throw new ApiError(409, "destino_obrigatorio", "Escolha o servidor do convite.");
-    this.manage(uid, serverId);
+    // Qualquer membro convida; listar e revogar convites dos outros continua com dono e admins.
+    this.role(uid, serverId);
     const first = channelId ?? this.sql.exec<{ id: string }>("SELECT id FROM channels WHERE server_id = ? ORDER BY created_at,id LIMIT 1", serverId).toArray()[0]?.id;
     if (!first) throw new ApiError(404, "canal_nao_encontrado", "Este servidor não tem canais disponíveis.");
     const destination = this.destination(first, uid);

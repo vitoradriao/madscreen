@@ -76,6 +76,11 @@ async function showShell(): Promise<void> {
     onDirectShare: friend => { select("share"); share.startWithFriend(friend); },
     onShare: target => { select("share"); share.startInChannel(target); },
     onSnapshot: next => { receivedSnapshot = true; updateDirectory(next); },
+    onShareControl: action => {
+      if (action !== "stop") { share.togglePrivacy(action === "pause"); return; }
+      // Mesma parada da página Minha transmissão; se o engine recusar, a página mostra o motivo.
+      void stopShare().catch(error => { select("share"); content.prepend(banner("error", error instanceof Error ? error.message : "Não foi possível parar a transmissão.")); });
+    },
   });
   let signingOut: Promise<void> | null = null;
   const signOut = (): Promise<void> => {
@@ -180,7 +185,10 @@ async function showShell(): Promise<void> {
   const apply = (state: ShareState): void => {
     if (disposed) return;
     share.update(state);
-    servers.setSharing(state.phase !== "idle");
+    servers.setSharing(state.phase !== "idle", {
+      paused: state.privacy_video === "paused", muted: state.audio_muted === true,
+      audio: !!state.audio_active, privacy: state.privacy_supported === true && !state.privacy_pending,
+    });
     updateNotice.setLive(state.phase !== "idle");
   };
   void getState().then(apply).catch(() => undefined);

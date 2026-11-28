@@ -123,6 +123,8 @@ try{
   await reset();await act('demo.notice()');await capture('aviso-atualizacao','Aviso de atualização','Consulta encontra versão disponível; sem baixar ou instalar');
   await act("demo.page('share');demo.shareState({phase:'starting'})");await capture('iniciando','Iniciando transmissão','Estado do supervisor; Cancelar continua disponível');
   await act("demo.shareState({phase:'stopping'})");await capture('parando','Parando transmissão','Estado do supervisor');
+  await reset();await act("(()=>{const next=structuredClone(demo.snapshot);next.servers[0].channels[0].live.unshift(next.servers[0].members[0]);demo.directory(next);demo.shareState({});})()");await capture('ao-vivo','Você ao vivo','Sua transmissão → Compartilhar tela → Entrar ao vivo.','Painel lateral com convite para assistir e controles rápidos.');
+  await click('[data-focuskey="share-invite"]');await capture('convidar-assistir','Convidar para assistir','Sua transmissão → Convidar para assistir.','Link fictício sem validade.');
   for(const width of [800,510]) {
     await send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
     await reset();
